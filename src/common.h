@@ -47,6 +47,7 @@ struct QuoteMeta {
 
 struct QuoteData {
     bool         valid = false;
+    std::wstring symbol;   // the symbol this was fetched for
     std::wstring error;
     QuoteMeta    meta;
     Series       series;

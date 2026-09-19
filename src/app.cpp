@@ -23,6 +23,8 @@ constexpr int IDC_LIST       = 100;
 constexpr int IDC_RANGE_BASE = 200;   // + range index
 constexpr int IDC_STYLE      = 300;
 constexpr int IDC_REFRESH    = 301;
+constexpr int IDC_ADD        = 302;
+constexpr int IDC_REMOVE     = 303;
 
 constexpr UINT_PTR kRefreshTimer = 1;
 
@@ -37,6 +39,7 @@ constexpr int kWideBtnW   = 84;
 constexpr int kBtnGap     = 4;
 constexpr int kStatsH     = 78;
 constexpr int kStatusH    = 20;
+constexpr int kListBtnGap = 6;
 constexpr int kMinWinW    = 900;
 constexpr int kMinWinH    = 560;
 
@@ -101,6 +104,78 @@ std::wstring TimeNow() {
     return b.data();
 }
 
+bool SameSymbol(const std::wstring& a, const std::wstring& b) {
+    return _wcsicmp(a.c_str(), b.c_str()) == 0;
+}
+
+// State shared with the "Add ticker" dialog through DWLP_USER.
+struct AddTickerState {
+    const Config* cfg = nullptr;  // for duplicate checks
+    StockEntry    result;
+};
+
+// Reads and validates the dialog fields; false leaves a hint in IDC_HINT.
+bool ReadAddTickerFields(HWND dlg, AddTickerState& st) {
+    assert(dlg != nullptr && st.cfg != nullptr);
+    std::array<wchar_t, 64>  symBuf{};
+    std::array<wchar_t, 128> nameBuf{};
+    GetDlgItemTextW(dlg, IDC_SYMBOL, symBuf.data(), static_cast<int>(symBuf.size()));
+    GetDlgItemTextW(dlg, IDC_NAME, nameBuf.data(), static_cast<int>(nameBuf.size()));
+
+    std::wstring symbol = symBuf.data();
+    std::wstring err;
+    if (!NormalizeSymbol(symbol, err)) {
+        SetDlgItemTextW(dlg, IDC_HINT, err.c_str());
+        return false;
+    }
+    for (size_t i = 0; i < st.cfg->stockCount; ++i) {
+        if (SameSymbol(st.cfg->stocks[i].symbol, symbol)) {
+            SetDlgItemTextW(dlg, IDC_HINT, (symbol + L" is already in the list").c_str());
+            return false;
+        }
+    }
+    st.result.symbol = symbol;
+    st.result.name   = NormalizeName(nameBuf.data(), symbol);
+    assert(!st.result.symbol.empty() && !st.result.name.empty());
+    return true;
+}
+
+INT_PTR CALLBACK AddTickerDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_INITDIALOG: {
+        SetWindowLongPtrW(dlg, DWLP_USER, static_cast<LONG_PTR>(lp));
+        SendDlgItemMessageW(dlg, IDC_SYMBOL, EM_LIMITTEXT, 31, 0);
+        SendDlgItemMessageW(dlg, IDC_NAME, EM_LIMITTEXT, 63, 0);
+        // Centre over the owner rather than the monitor.
+        RECT owner{};
+        RECT self{};
+        const HWND parent = GetParent(dlg);
+        if (parent != nullptr && GetWindowRect(parent, &owner) && GetWindowRect(dlg, &self)) {
+            const int x = owner.left + ((owner.right - owner.left) - (self.right - self.left)) / 2;
+            const int y = owner.top  + ((owner.bottom - owner.top) - (self.bottom - self.top)) / 2;
+            SetWindowPos(dlg, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        return TRUE;  // let the system focus the first control
+    }
+    case WM_COMMAND: {
+        const int id = LOWORD(wp);
+        if (id == IDOK) {
+            auto* st = reinterpret_cast<AddTickerState*>(GetWindowLongPtrW(dlg, DWLP_USER));
+            assert(st != nullptr);
+            if (st != nullptr && ReadAddTickerFields(dlg, *st)) { EndDialog(dlg, IDOK); }
+            return TRUE;
+        }
+        if (id == IDCANCEL) {
+            EndDialog(dlg, IDCANCEL);
+            return TRUE;
+        }
+        return FALSE;
+    }
+    default:
+        return FALSE;
+    }
+}
+
 } // namespace
 
 App::~App() {
@@ -163,8 +238,11 @@ bool App::Create(HINSTANCE hInst, int nCmdShow, std::wstring& err) {
         return false;
     }
 
-    const ACCEL accel[] = { { FVIRTKEY, VK_F5, static_cast<WORD>(IDC_REFRESH) } };
-    hAccel_ = CreateAcceleratorTableW(const_cast<ACCEL*>(accel), 1);
+    const ACCEL accel[] = {
+        { FVIRTKEY, VK_F5, static_cast<WORD>(IDC_REFRESH) },
+        { FVIRTKEY | FCONTROL, 'N', static_cast<WORD>(IDC_ADD) },
+    };
+    hAccel_ = CreateAcceleratorTableW(const_cast<ACCEL*>(accel), 2);
     assert(hAccel_ != nullptr);
 
     ShowWindow(hwnd_, nCmdShow);
@@ -267,7 +345,7 @@ void App::CreateFonts() {
                            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                            DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
     assert(hUiFont_ != nullptr);
-    const HWND controls[] = { hList_, hStyleBtn_, hRefreshBtn_ };
+    const HWND controls[] = { hList_, hStyleBtn_, hRefreshBtn_, hAddBtn_, hRemoveBtn_ };
     for (HWND h : controls) {
         if (h != nullptr) { SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(hUiFont_), TRUE); }
     }
@@ -309,6 +387,16 @@ void App::CreateControls() {
                                    0, 0, 10, 10, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_REFRESH)),
                                    hInst_, nullptr);
     assert(hStyleBtn_ != nullptr && hRefreshBtn_ != nullptr);
+
+    hAddBtn_ = CreateWindowExW(0, L"BUTTON", L"Add… (Ctrl+N)",
+                               WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_GROUP | BS_PUSHBUTTON,
+                               0, 0, 10, 10, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_ADD)),
+                               hInst_, nullptr);
+    hRemoveBtn_ = CreateWindowExW(0, L"BUTTON", L"Remove",
+                                  WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                  0, 0, 10, 10, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_REMOVE)),
+                                  hInst_, nullptr);
+    assert(hAddBtn_ != nullptr && hRemoveBtn_ != nullptr);
     CreateFonts();  // apply font + item height to the controls just made
 }
 
@@ -319,9 +407,14 @@ void App::Layout() {
     const int h = rc.bottom;
     const int m = Px(kMargin);
 
-    listRect_ = { m, m, m + Px(kListW), h - m };
+    const int listBtnH = Px(kButtonH);
+    listRect_ = { m, m, m + Px(kListW), h - m - listBtnH - Px(kListBtnGap) };
     MoveWindow(hList_, listRect_.left, listRect_.top,
                listRect_.right - listRect_.left, listRect_.bottom - listRect_.top, TRUE);
+    const int listBtnY = h - m - listBtnH;
+    const int listBtnW = (Px(kListW) - Px(kBtnGap)) / 2;
+    MoveWindow(hAddBtn_, listRect_.left, listBtnY, listBtnW, listBtnH, TRUE);
+    MoveWindow(hRemoveBtn_, listRect_.right - listBtnW, listBtnY, listBtnW, listBtnH, TRUE);
 
     const int rightX = listRect_.right + m;
     const int rightR = w - m;
@@ -348,7 +441,7 @@ void App::Layout() {
 
 void App::RequestAllSummaries() {
     for (size_t i = 0; i < cfg_.stockCount; ++i) {
-        if (!fetcher_.Enqueue({ JobKind::Summary, i, 0 })) { SetStatus(L"Fetch queue is full"); }
+        if (!fetcher_.Enqueue(JobKind::Summary, i, 0)) { SetStatus(L"Fetch queue is full"); }
     }
 }
 
@@ -360,7 +453,67 @@ void App::RequestChart(bool clearCurrent) {
         chartLoading_ = true;
         InvalidateRect(hwnd_, &chartRect_, FALSE);
     }
-    if (!fetcher_.Enqueue({ JobKind::Chart, selected_, range_ })) { SetStatus(L"Fetch queue is full"); }
+    if (!fetcher_.Enqueue(JobKind::Chart, selected_, range_)) { SetStatus(L"Fetch queue is full"); }
+}
+
+void App::OnAddTicker() {
+    if (cfg_.stockCount >= kMaxStocks) {
+        SetStatus(L"Limit of " + std::to_wstring(kMaxStocks) + L" tickers reached");
+        return;
+    }
+    AddTickerState st;
+    st.cfg = &cfg_;
+    const INT_PTR rc = DialogBoxParamW(hInst_, MAKEINTRESOURCEW(IDD_ADDTICKER), hwnd_,
+                                       &AddTickerDlgProc, reinterpret_cast<LPARAM>(&st));
+    if (rc != IDOK) { return; }
+    assert(!st.result.symbol.empty());
+
+    std::wstring err;
+    if (!WriteStockEntry(cfg_.path, st.result, err)) {
+        SetStatus(err);
+        return;
+    }
+    const size_t index = cfg_.stockCount;
+    cfg_.stocks[index]  = st.result;
+    ++cfg_.stockCount;
+    (*summaries_)[index] = QuoteData{};
+    SendMessageW(hList_, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(st.result.symbol.c_str()));
+
+    fetcher_.UpdateStocks(cfg_);   // drops pending jobs, so re-request everything
+    RequestAllSummaries();
+    SelectStock(index);
+    SetStatus(L"Added " + st.result.symbol);
+    assert(cfg_.stockCount <= kMaxStocks);
+}
+
+void App::OnRemoveTicker() {
+    assert(selected_ < cfg_.stockCount);
+    if (cfg_.stockCount <= 1) {
+        SetStatus(L"Keep at least one ticker");
+        return;
+    }
+    const size_t       index  = selected_;
+    const std::wstring symbol = cfg_.stocks[index].symbol;
+    std::wstring err;
+    if (!DeleteStockEntry(cfg_.path, symbol, err)) {
+        SetStatus(err);
+        return;
+    }
+    // Shift the tail down by one (bounded by kMaxStocks).
+    for (size_t i = index; i + 1 < cfg_.stockCount && i + 1 < kMaxStocks; ++i) {
+        cfg_.stocks[i]     = cfg_.stocks[i + 1];
+        (*summaries_)[i]   = (*summaries_)[i + 1];
+    }
+    --cfg_.stockCount;
+    cfg_.stocks[cfg_.stockCount]     = StockEntry{};
+    (*summaries_)[cfg_.stockCount]   = QuoteData{};
+    SendMessageW(hList_, LB_DELETESTRING, static_cast<WPARAM>(index), 0);
+
+    fetcher_.UpdateStocks(cfg_);
+    RequestAllSummaries();
+    SelectStock((index < cfg_.stockCount) ? index : cfg_.stockCount - 1);
+    SetStatus(L"Removed " + symbol);
+    assert(cfg_.stockCount >= 1);
 }
 
 void App::SelectStock(size_t index) {
@@ -405,6 +558,10 @@ void App::OnCommand(WPARAM wp) {
         InvalidateRect(hwnd_, &chartRect_, FALSE);
     } else if (id == IDC_REFRESH) {
         OnTimer();
+    } else if (id == IDC_ADD) {
+        OnAddTicker();
+    } else if (id == IDC_REMOVE && code == BN_CLICKED) {
+        OnRemoveTicker();
     }
 }
 
@@ -472,6 +629,10 @@ void App::OnSummaryReady(size_t stock) {
     if (stock >= cfg_.stockCount) { return; }
     QuoteData& q = (*summaries_)[stock];
     if (!fetcher_.CopySummary(stock, q)) { return; }
+    if (!SameSymbol(q.symbol, cfg_.stocks[stock].symbol)) {
+        q = QuoteData{};  // result for a symbol that has since moved or gone
+        return;
+    }
     if (q.valid) { SetStatus(L"Updated " + TimeNow()); }
     else         { SetStatus(cfg_.stocks[stock].symbol + L": " + q.error); }
     InvalidateRect(hList_, nullptr, TRUE);
@@ -484,6 +645,10 @@ void App::OnSummaryReady(size_t stock) {
 void App::OnChartReady(size_t stock, size_t range) {
     if (stock != selected_ || range != range_) { return; }  // stale
     if (!fetcher_.CopyChart(stock, range, *chart_)) { return; }
+    if (!SameSymbol(chart_->symbol, cfg_.stocks[stock].symbol)) {
+        *chart_ = QuoteData{};  // fetched before the list changed; a fresh request is queued
+        return;
+    }
     chartLoading_ = false;
     if (!chart_->valid) { SetStatus(cfg_.stocks[stock].symbol + L": " + chart_->error); }
     InvalidateRect(hwnd_, &chartRect_, FALSE);

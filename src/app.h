@@ -38,6 +38,8 @@ private:
     void OnDrawItem(const DRAWITEMSTRUCT* dis);
     void OnSummaryReady(size_t stock);
     void OnChartReady(size_t stock, size_t range);
+    void OnAddTicker();
+    void OnRemoveTicker();
 
     // helpers
     void CreateControls();
@@ -71,6 +73,8 @@ private:
     std::array<HWND, kRanges.size()> hRangeBtns_{};
     HWND      hStyleBtn_   = nullptr;
     HWND      hRefreshBtn_ = nullptr;
+    HWND      hAddBtn_     = nullptr;
+    HWND      hRemoveBtn_  = nullptr;
     HFONT     hUiFont_     = nullptr;
     HACCEL    hAccel_      = nullptr;
 

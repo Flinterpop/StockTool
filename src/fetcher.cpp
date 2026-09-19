@@ -34,9 +34,10 @@ bool Fetcher::Start(HWND notify, const Config& cfg, std::wstring& err) {
         err = L"Fetcher already started";
         return false;
     }
-    notify_    = notify;
-    cfg_       = cfg;
-    buf_       = std::make_unique<char[]>(kHttpBufSize);
+    notify_      = notify;
+    cfg_         = cfg;
+    urlTemplate_ = cfg.urlTemplate;
+    buf_         = std::make_unique<char[]>(kHttpBufSize);
     scratch_   = std::make_unique<QuoteData>();
     summaries_ = std::make_unique<std::array<QuoteData, kMaxStocks>>();
     chart_     = std::make_unique<QuoteData>();
@@ -94,31 +95,43 @@ bool Fetcher::Pop(FetchJob& job) {
     return true;
 }
 
-bool Fetcher::Enqueue(const FetchJob& job) {
+void Fetcher::UpdateStocks(const Config& cfg) {
+    assert(cfg.stockCount <= kMaxStocks);
+    cfg_.stocks     = cfg.stocks;
+    cfg_.stockCount = cfg.stockCount;
+    std::lock_guard<std::mutex> lock(qMutex_);
+    qCount_ = 0;  // drop pending jobs; their indices may have shifted
+}
+
+bool Fetcher::Enqueue(JobKind kind, size_t stock, size_t range) {
     assert(thread_ != nullptr);
-    assert(job.stock < cfg_.stockCount);
-    assert(job.range < kRanges.size());
-    if (job.stock >= cfg_.stockCount || job.range >= kRanges.size()) { return false; }
+    assert(stock < cfg_.stockCount);
+    assert(range < kRanges.size());
+    if (stock >= cfg_.stockCount || range >= kRanges.size()) { return false; }
     {
         std::lock_guard<std::mutex> lock(qMutex_);
         for (size_t k = 0; k < qCount_; ++k) {
             const FetchJob& q = queue_[(qHead_ + k) % kMaxJobs];
-            if (q.kind == job.kind && q.stock == job.stock && q.range == job.range) {
+            if (q.kind == kind && q.stock == stock && q.range == range) {
                 return true;  // already pending
             }
         }
         if (qCount_ >= kMaxJobs) { return false; }
-        queue_[(qHead_ + qCount_) % kMaxJobs] = job;
+        FetchJob& slot = queue_[(qHead_ + qCount_) % kMaxJobs];
+        slot.kind   = kind;
+        slot.stock  = stock;
+        slot.range  = range;
+        slot.symbol = cfg_.stocks[stock].symbol;
         ++qCount_;
     }
     qCv_.notify_one();
     return true;
 }
 
-std::wstring Fetcher::BuildUrl(size_t stock, const RangeSpec& spec) const {
-    assert(stock < cfg_.stockCount);
-    std::wstring url = cfg_.urlTemplate;
-    ReplaceAll(url, L"{symbol}",   cfg_.stocks[stock].symbol);
+std::wstring Fetcher::BuildUrl(const std::wstring& symbol, const RangeSpec& spec) const {
+    assert(!symbol.empty());
+    std::wstring url = urlTemplate_;
+    ReplaceAll(url, L"{symbol}",   symbol);
     ReplaceAll(url, L"{range}",    spec.range);
     ReplaceAll(url, L"{interval}", spec.interval);
     return url;
@@ -143,11 +156,13 @@ bool Fetcher::Fetch(const std::wstring& url, QuoteData& out) {
 }
 
 void Fetcher::Process(const FetchJob& job) {
-    assert(job.stock < cfg_.stockCount);
+    assert(job.stock < kMaxStocks);
     assert(job.range < kRanges.size());
+    assert(!job.symbol.empty());
     const RangeSpec& spec = (job.kind == JobKind::Chart) ? kRanges[job.range] : kSummarySpec;
-    const bool ok = Fetch(BuildUrl(job.stock, spec), *scratch_);
+    const bool ok = Fetch(BuildUrl(job.symbol, spec), *scratch_);
     (void)ok;  // failure is reported through QuoteData::error
+    scratch_->symbol = job.symbol;
     {
         std::lock_guard<std::mutex> lock(dataMutex_);
         if (job.kind == JobKind::Summary) {

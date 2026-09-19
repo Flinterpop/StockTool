@@ -15,9 +15,10 @@ namespace st {
 enum class JobKind : uint8_t { Summary, Chart };
 
 struct FetchJob {
-    JobKind kind  = JobKind::Summary;
-    size_t  stock = 0;   // index into Config::stocks
-    size_t  range = 0;   // index into kRanges (Chart only)
+    JobKind      kind  = JobKind::Summary;
+    size_t       stock = 0;   // index into Config::stocks at enqueue time
+    size_t       range = 0;   // index into kRanges (Chart only)
+    std::wstring symbol;      // captured at enqueue time; the worker never reads Config
 };
 
 // Posted to the notify window when a job completes.
@@ -34,10 +35,16 @@ public:
     bool Start(HWND notify, const Config& cfg, std::wstring& err);
     void Stop();
 
-    // Queues a job (duplicates are coalesced). False if the queue is full.
-    bool Enqueue(const FetchJob& job);
+    // Replaces the stock list (UI thread). Pending jobs are dropped because
+    // their indices may no longer line up; the caller re-requests what it needs.
+    void UpdateStocks(const Config& cfg);
 
-    // Copy the latest result for the UI thread. False if none / stale.
+    // Queues a job for stock `stock` (duplicates are coalesced). False if the
+    // queue is full or the index is out of range.
+    bool Enqueue(JobKind kind, size_t stock, size_t range);
+
+    // Copy the latest result for the UI thread. False if none / stale. The
+    // caller must compare QuoteData::symbol with what it expects at `stock`.
     bool CopySummary(size_t stock, QuoteData& out);
     bool CopyChart(size_t stock, size_t range, QuoteData& out);
 
@@ -47,11 +54,12 @@ private:
     bool Pop(FetchJob& job);
     void Process(const FetchJob& job);
     bool Fetch(const std::wstring& url, QuoteData& out);
-    std::wstring BuildUrl(size_t stock, const RangeSpec& spec) const;
+    std::wstring BuildUrl(const std::wstring& symbol, const RangeSpec& spec) const;
 
-    HWND   notify_ = nullptr;
-    Config cfg_;
-    HANDLE thread_ = nullptr;
+    HWND         notify_ = nullptr;
+    std::wstring urlTemplate_;   // immutable after Start(); read by the worker
+    Config       cfg_;           // UI-thread only after Start()
+    HANDLE       thread_ = nullptr;
 
     // Worker-only scratch space, allocated once in Start().
     std::unique_ptr<char[]>    buf_;

@@ -155,4 +155,63 @@ bool LoadConfig(const std::wstring& path, Config& out, std::wstring& err) {
     return true;
 }
 
+bool NormalizeSymbol(std::wstring& symbol, std::wstring& err) {
+    constexpr size_t kMaxSymbolLen = 31;
+    symbol = Trim(symbol);
+    if (symbol.empty()) {
+        err = L"Enter a symbol";
+        return false;
+    }
+    if (symbol.size() > kMaxSymbolLen) {
+        err = L"Symbol is too long";
+        return false;
+    }
+    for (size_t i = 0; i < symbol.size(); ++i) {
+        wchar_t& c = symbol[i];
+        c = static_cast<wchar_t>(std::towupper(c));
+        const bool ok = (c >= L'A' && c <= L'Z') || (c >= L'0' && c <= L'9') ||
+                        c == L'.' || c == L'-' || c == L'^' || c == L'=';
+        if (!ok) {
+            err = L"Symbols may only contain letters, digits, . - ^ =";
+            return false;
+        }
+    }
+    assert(!symbol.empty());
+    return true;
+}
+
+std::wstring NormalizeName(const std::wstring& name, const std::wstring& fallback) {
+    constexpr size_t kMaxNameLen = 63;
+    std::wstring out;
+    out.reserve(name.size());
+    for (size_t i = 0; i < name.size() && i < 4096; ++i) {
+        const wchar_t c = name[i];
+        if (c == L'\r' || c == L'\n' || c == L'\0') { continue; }
+        out += c;
+    }
+    out = Trim(out);
+    if (out.size() > kMaxNameLen) { out.resize(kMaxNameLen); }
+    return out.empty() ? fallback : out;
+}
+
+bool WriteStockEntry(const std::wstring& path, const StockEntry& entry, std::wstring& err) {
+    assert(!path.empty());
+    assert(!entry.symbol.empty());
+    if (!WritePrivateProfileStringW(L"stocks", entry.symbol.c_str(), entry.name.c_str(), path.c_str())) {
+        err = L"Could not write " + path;
+        return false;
+    }
+    return true;
+}
+
+bool DeleteStockEntry(const std::wstring& path, const std::wstring& symbol, std::wstring& err) {
+    assert(!path.empty());
+    assert(!symbol.empty());
+    if (!WritePrivateProfileStringW(L"stocks", symbol.c_str(), nullptr, path.c_str())) {
+        err = L"Could not update " + path;
+        return false;
+    }
+    return true;
+}
+
 } // namespace st
