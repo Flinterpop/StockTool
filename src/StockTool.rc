@@ -1,0 +1,36 @@
+// Version resource. The numbers come from CMake (project(... VERSION)) via
+// STOCKTOOL_VERSION_* so the numeric tuple and the strings cannot disagree.
+#include <winver.h>
+
+#define ST_STR_(x) #x
+#define ST_STR(x)  ST_STR_(x)
+#define ST_VERSION_STRING \
+    ST_STR(STOCKTOOL_VERSION_MAJOR) "." ST_STR(STOCKTOOL_VERSION_MINOR) "." ST_STR(STOCKTOOL_VERSION_PATCH) ".0"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION    STOCKTOOL_VERSION_MAJOR,STOCKTOOL_VERSION_MINOR,STOCKTOOL_VERSION_PATCH,0
+ PRODUCTVERSION STOCKTOOL_VERSION_MAJOR,STOCKTOOL_VERSION_MINOR,STOCKTOOL_VERSION_PATCH,0
+ FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
+ FILEFLAGS      0
+ FILEOS         VOS_NT_WINDOWS32
+ FILETYPE       VFT_APP
+ FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName",      "B. Graham"
+            VALUE "FileDescription",  "StockTool - stock watch list and charts"
+            VALUE "FileVersion",      ST_VERSION_STRING
+            VALUE "InternalName",     "StockTool"
+            VALUE "OriginalFilename", "StockTool.exe"
+            VALUE "ProductName",      "StockTool"
+            VALUE "ProductVersion",   ST_VERSION_STRING
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

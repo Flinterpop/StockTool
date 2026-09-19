@@ -1,6 +1,11 @@
 # StockTool
 
-*Last updated: 18 Sep 2026*
+[![Release][release-badge]][release-latest]
+
+[release-badge]: https://img.shields.io/badge/release-v0.1.0-blue
+[release-latest]: https://github.com/Flinterpop/StockTool/releases/latest
+
+*Last updated: 19 Sep 2026*
 
 A small Win32 C++ desktop app that tracks a configurable list of stocks and shows the usual quote-page views: price chart (line or candles) with range presets, volume bars, hover crosshair, day/52-week stats, and a watch list with last price and day change. No MFC, no frameworks — plain Win32, GDI+, WinHTTP, and `nlohmann/json` from vcpkg.
 
@@ -36,7 +41,11 @@ cmake --build --preset release      # or: --preset debug
 build\Release\StockTool.exe
 ```
 
-The build uses `/W4 /WX /permissive-` and the static CRT (vcpkg `x64-windows-static`).
+The build uses `/W4 /WX /permissive-` and the static CRT (vcpkg `x64-windows-static`), so the exe has no VC++ redistributable dependency.
+
+## Releasing
+
+The version is set once, in `project(StockTool VERSION x.y.z)` in `CMakeLists.txt`; it flows into the window title, the HTTP `User-Agent`, and the exe's `VERSIONINFO` resource (`src/StockTool.rc`). The only other copy is the badge at the top of this README — bump both in the same commit, then tag `vx.y.z` and attach `build\Release\StockTool.exe` plus `stocktool.cfg` to the GitHub release.
 
 ## Layout of the code
 

@@ -14,6 +14,10 @@ using namespace Gdiplus;
 
 constexpr wchar_t kClassName[] = L"StockToolMainWindow";
 
+#define ST_WIDE_(s) L##s
+#define ST_WIDE(s)  ST_WIDE_(s)
+constexpr wchar_t kWindowTitle[] = L"StockTool v" ST_WIDE(STOCKTOOL_VERSION);
+
 constexpr int IDC_LIST       = 100;
 constexpr int IDC_RANGE_BASE = 200;   // + range index
 constexpr int IDC_STYLE      = 300;
@@ -142,7 +146,7 @@ bool App::Create(HINSTANCE hInst, int nCmdShow, std::wstring& err) {
     const float sysScale = static_cast<float>(GetDpiForSystem()) / 96.0f;
     const int w = static_cast<int>(1150.0f * sysScale);
     const int h = static_cast<int>(720.0f * sysScale);
-    hwnd_ = CreateWindowExW(0, kClassName, L"StockTool", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+    hwnd_ = CreateWindowExW(0, kClassName, kWindowTitle, WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
                             CW_USEDEFAULT, CW_USEDEFAULT, w, h, nullptr, nullptr, hInst, this);
     if (hwnd_ == nullptr) {
         err = L"CreateWindowEx failed";

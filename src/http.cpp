@@ -10,6 +10,11 @@
 namespace st {
 namespace {
 
+// Widen the CMake-supplied version string for the User-Agent.
+#define ST_WIDE_(s) L##s
+#define ST_WIDE(s)  ST_WIDE_(s)
+constexpr wchar_t kAgent[] = L"StockTool/" ST_WIDE(STOCKTOOL_VERSION);
+
 struct Handle {
     HINTERNET h = nullptr;
     Handle() = default;
@@ -93,7 +98,7 @@ bool HttpGetUrl(const std::wstring& url, char* buf, size_t cap,
     const std::wstring target = std::wstring(path.data()) + extra.data();
 
     Handle session;
-    session.h = WinHttpOpen(L"StockTool/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+    session.h = WinHttpOpen(kAgent, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                             WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (session.h == nullptr) {
         err = ErrorText(L"WinHttpOpen", GetLastError());
@@ -127,10 +132,10 @@ bool HttpGetUrl(const std::wstring& url, char* buf, size_t cap,
                                            &decomp, sizeof(decomp));
     (void)decompOk;
 
-    static const wchar_t kHeaders[] =
-        L"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) StockTool/1.0\r\n"
-        L"Accept: application/json\r\n";
-    if (!WinHttpAddRequestHeaders(req.h, kHeaders, static_cast<DWORD>(-1),
+    const std::wstring headers =
+        std::wstring(L"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) ") + kAgent +
+        L"\r\nAccept: application/json\r\n";
+    if (!WinHttpAddRequestHeaders(req.h, headers.c_str(), static_cast<DWORD>(-1),
                                   WINHTTP_ADDREQ_FLAG_ADD)) {
         err = ErrorText(L"WinHttpAddRequestHeaders", GetLastError());
         return false;

@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
-project(StockTool VERSION 0.1.0 LANGUAGES CXX)
+# Single source of truth for the version: it flows into the code
+# (STOCKTOOL_VERSION*) and the exe's VERSIONINFO resource from here.
+project(StockTool VERSION 0.1.0 LANGUAGES CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -19,6 +21,7 @@ add_executable(StockTool WIN32
     src/http.cpp
     src/quote_parser.cpp
     src/textfmt.cpp
+    src/StockTool.rc
 )
 
 target_compile_definitions(StockTool PRIVATE
@@ -26,6 +29,10 @@ target_compile_definitions(StockTool PRIVATE
     WIN32_LEAN_AND_MEAN
     NOMINMAX
     _CRT_SECURE_NO_WARNINGS
+    $<$<COMPILE_LANGUAGE:CXX>:STOCKTOOL_VERSION="${PROJECT_VERSION}">
+    STOCKTOOL_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
+    STOCKTOOL_VERSION_MINOR=${PROJECT_VERSION_MINOR}
+    STOCKTOOL_VERSION_PATCH=${PROJECT_VERSION_PATCH}
 )
 
 # Power of 10: strictest warnings, treated as errors. Third-party headers

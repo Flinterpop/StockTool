@@ -10,6 +10,7 @@
 !/src/
 !/src/*.cpp
 !/src/*.h
+!/src/*.rc
 
 # ---- Generated (last match wins) -------------------------------------------
 build/
