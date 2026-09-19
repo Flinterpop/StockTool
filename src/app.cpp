@@ -1,5 +1,6 @@
 #include "app.h"
 
+#include "resource.h"
 #include "textfmt.h"
 
 #include <windowsx.h>
@@ -136,7 +137,16 @@ bool App::Create(HINSTANCE hInst, int nCmdShow, std::wstring& err) {
     wc.lpfnWndProc   = &App::WndProc;
     wc.hInstance     = hInst;
     wc.hCursor       = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hIcon         = LoadIconW(nullptr, IDI_APPLICATION);
+    // Large icon for Alt-Tab/taskbar, small one for the title bar; both scaled
+    // from the multi-size .ico by the system.
+    const int bigCx   = GetSystemMetrics(SM_CXICON);
+    const int smallCx = GetSystemMetrics(SM_CXSMICON);
+    wc.hIcon   = static_cast<HICON>(LoadImageW(hInst, MAKEINTRESOURCEW(IDI_APPICON), IMAGE_ICON,
+                                               bigCx, bigCx, LR_DEFAULTCOLOR));
+    wc.hIconSm = static_cast<HICON>(LoadImageW(hInst, MAKEINTRESOURCEW(IDI_APPICON), IMAGE_ICON,
+                                               smallCx, smallCx, LR_DEFAULTCOLOR));
+    assert(wc.hIcon != nullptr && wc.hIconSm != nullptr);
+    if (wc.hIcon == nullptr) { wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION); }
     wc.lpszClassName = kClassName;
     if (RegisterClassExW(&wc) == 0) {
         err = L"RegisterClassEx failed";

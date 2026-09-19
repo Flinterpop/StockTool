@@ -60,6 +60,8 @@ The version is set once, in `project(StockTool VERSION x.y.z)` in `CMakeLists.tx
 | `src/config.*` | `stocktool.cfg` reading and default-file creation. |
 | `src/textfmt.*` | Price/change/volume/date formatting. |
 | `src/common.h` | Fixed-capacity data types and the range presets. |
+| `src/StockTool.rc`, `src/resource.h` | Version resource and the app icon (`src/StockTool.ico`). |
+| `tools/make_icon.py` | Regenerates the multi-size `.ico` with Pillow: `python tools/make_icon.py`. |
 
 Notes:
 

@@ -11,9 +11,13 @@
 !/src/*.cpp
 !/src/*.h
 !/src/*.rc
+!/src/*.ico
+!/tools/
+!/tools/*.py
 
 # ---- Generated (last match wins) -------------------------------------------
 build/
 out/
 .vs/
 *.user
+__pycache__/
