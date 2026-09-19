@@ -1,12 +1,16 @@
-// Parses the provider's chart JSON into QuoteData.
+// Parses the provider's JSON into QuoteData / QuoteStats.
 #pragma once
 
 #include "common.h"
 
 namespace st {
 
-// Parses `len` bytes of JSON at `data`. Returns false and sets `err`
-// (including any error message embedded in the response) on failure.
+// Chart endpoint: parses `len` bytes of JSON at `data`. Returns false and
+// sets `err` (including any error message embedded in the response).
 bool ParseChartJson(const char* data, size_t len, QuoteData& out, std::wstring& err);
+
+// Batch quote endpoint: one QuoteStats per result, `count` set on return.
+bool ParseQuoteBatchJson(const char* data, size_t len,
+                         std::array<QuoteStats, kMaxStocks>& out, size_t& count, std::wstring& err);
 
 } // namespace st

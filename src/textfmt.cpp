@@ -14,6 +14,23 @@ constexpr std::array<const wchar_t*, 12> kMonths = {
     L"Jul", L"Aug", L"Sep", L"Oct", L"Nov", L"Dec",
 };
 
+// Inserts thousands separators into the integer part of a "%.2f" string.
+std::wstring Group(const std::wstring& plain) {
+    const size_t dot = plain.find(L'.');
+    const size_t intEnd = (dot == std::wstring::npos) ? plain.size() : dot;
+    const size_t start = (!plain.empty() && plain[0] == L'-') ? 1 : 0;
+    std::wstring out;
+    out.reserve(plain.size() + 8);
+    if (start == 1) { out += L'-'; }
+    const size_t digits = intEnd - start;
+    for (size_t i = 0; i < digits && i < 64; ++i) {
+        if (i > 0 && (digits - i) % 3 == 0) { out += L','; }
+        out += plain[start + i];
+    }
+    out += plain.substr(intEnd);
+    return out;
+}
+
 } // namespace
 
 std::wstring FormatPrice(double v) {
@@ -23,10 +40,27 @@ std::wstring FormatPrice(double v) {
     return b.data();
 }
 
+std::wstring FormatMoney(double v) {
+    if (!std::isfinite(v)) { return L"-"; }
+    return Group(FormatPrice(v));
+}
+
+std::wstring FormatSignedMoney(double v) {
+    if (!std::isfinite(v)) { return L"-"; }
+    return (v >= 0.0 ? L"+" : L"") + FormatMoney(v);
+}
+
 std::wstring FormatChange(double change, double pct) {
     if (!std::isfinite(change) || !std::isfinite(pct)) { return L"-"; }
     std::array<wchar_t, 64> b{};
     swprintf_s(b.data(), b.size(), L"%+.2f (%+.2f%%)", change, pct);
+    return b.data();
+}
+
+std::wstring FormatPct(double pct) {
+    if (!std::isfinite(pct)) { return L"-"; }
+    std::array<wchar_t, 32> b{};
+    swprintf_s(b.data(), b.size(), L"%+.2f%%", pct);
     return b.data();
 }
 
@@ -38,6 +72,22 @@ std::wstring FormatVolume(double v) {
     else if (v >= 1e3) { swprintf_s(b.data(), b.size(), L"%.1fK", v / 1e3); }
     else               { swprintf_s(b.data(), b.size(), L"%.0f", v); }
     return b.data();
+}
+
+std::wstring FormatCompact(double v) {
+    if (!std::isfinite(v) || v <= 0.0) { return L"-"; }
+    std::array<wchar_t, 64> b{};
+    if (v >= 1e12)     { swprintf_s(b.data(), b.size(), L"%.2fT", v / 1e12); }
+    else if (v >= 1e9) { swprintf_s(b.data(), b.size(), L"%.2fB", v / 1e9); }
+    else if (v >= 1e6) { swprintf_s(b.data(), b.size(), L"%.2fM", v / 1e6); }
+    else if (v >= 1e3) { swprintf_s(b.data(), b.size(), L"%.1fK", v / 1e3); }
+    else               { swprintf_s(b.data(), b.size(), L"%.2f", v); }
+    return b.data();
+}
+
+std::wstring FormatRatio(double v) {
+    if (!std::isfinite(v) || v == 0.0) { return L"-"; }
+    return FormatPrice(v);
 }
 
 std::wstring FormatDate(int64_t unixTime, int32_t gmtOffsetSec, DateStyle style) {

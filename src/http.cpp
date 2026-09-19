@@ -70,8 +70,30 @@ bool ReadBody(HINTERNET req, char* buf, size_t cap, size_t& len, std::wstring& e
 
 } // namespace
 
-bool HttpGetUrl(const std::wstring& url, char* buf, size_t cap,
-                HttpResult& out, std::wstring& err) {
+HttpClient::~HttpClient() {
+    if (session_ != nullptr) { WinHttpCloseHandle(static_cast<HINTERNET>(session_)); }
+}
+
+bool HttpClient::EnsureSession(std::wstring& err) {
+    if (session_ != nullptr) { return true; }
+    HINTERNET s = WinHttpOpen(kAgent, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                              WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (s == nullptr) {
+        err = ErrorText(L"WinHttpOpen", GetLastError());
+        return false;
+    }
+    // resolve, connect, send, receive (ms)
+    if (!WinHttpSetTimeouts(s, 10000, 10000, 10000, 15000)) {
+        err = ErrorText(L"WinHttpSetTimeouts", GetLastError());
+        WinHttpCloseHandle(s);
+        return false;
+    }
+    session_ = s;
+    return true;
+}
+
+bool HttpClient::Get(const std::wstring& url, char* buf, size_t cap,
+                     HttpResult& out, std::wstring& err) {
     assert(buf != nullptr);
     assert(cap > 0);
     out = HttpResult{};
@@ -79,6 +101,7 @@ bool HttpGetUrl(const std::wstring& url, char* buf, size_t cap,
         err = L"Bad URL";
         return false;
     }
+    if (!EnsureSession(err)) { return false; }
 
     std::array<wchar_t, 256>  host{};
     std::array<wchar_t, 2048> path{};
@@ -97,21 +120,8 @@ bool HttpGetUrl(const std::wstring& url, char* buf, size_t cap,
     }
     const std::wstring target = std::wstring(path.data()) + extra.data();
 
-    Handle session;
-    session.h = WinHttpOpen(kAgent, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                            WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (session.h == nullptr) {
-        err = ErrorText(L"WinHttpOpen", GetLastError());
-        return false;
-    }
-    // resolve, connect, send, receive (ms)
-    if (!WinHttpSetTimeouts(session.h, 10000, 10000, 10000, 15000)) {
-        err = ErrorText(L"WinHttpSetTimeouts", GetLastError());
-        return false;
-    }
-
     Handle conn;
-    conn.h = WinHttpConnect(session.h, host.data(), uc.nPort, 0);
+    conn.h = WinHttpConnect(static_cast<HINTERNET>(session_), host.data(), uc.nPort, 0);
     if (conn.h == nullptr) {
         err = ErrorText(L"WinHttpConnect", GetLastError());
         return false;
@@ -128,13 +138,12 @@ bool HttpGetUrl(const std::wstring& url, char* buf, size_t cap,
 
     // Transparent gzip/deflate; best effort, unsupported on very old builds.
     DWORD decomp = WINHTTP_DECOMPRESSION_FLAG_ALL;
-    const BOOL decompOk = WinHttpSetOption(req.h, WINHTTP_OPTION_DECOMPRESSION,
-                                           &decomp, sizeof(decomp));
+    const BOOL decompOk = WinHttpSetOption(req.h, WINHTTP_OPTION_DECOMPRESSION, &decomp, sizeof(decomp));
     (void)decompOk;
 
     const std::wstring headers =
         std::wstring(L"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) ") + kAgent +
-        L"\r\nAccept: application/json\r\n";
+        L"\r\nAccept: application/json, text/plain, */*\r\n";
     if (!WinHttpAddRequestHeaders(req.h, headers.c_str(), static_cast<DWORD>(-1),
                                   WINHTTP_ADDREQ_FLAG_ADD)) {
         err = ErrorText(L"WinHttpAddRequestHeaders", GetLastError());
@@ -160,6 +169,26 @@ bool HttpGetUrl(const std::wstring& url, char* buf, size_t cap,
     }
     out.status = status;
     return ReadBody(req.h, buf, cap, out.length, err);
+}
+
+std::wstring UrlEncode(const std::wstring& s) {
+    std::wstring out;
+    out.reserve(s.size() * 3);
+    for (size_t i = 0; i < s.size() && i < 4096; ++i) {
+        const wchar_t c = s[i];
+        const bool keep = (c >= L'A' && c <= L'Z') || (c >= L'a' && c <= L'z') ||
+                          (c >= L'0' && c <= L'9') || c == L'-' || c == L'_' || c == L'.' || c == L'~';
+        if (keep) {
+            out += c;
+        } else if (c < 0x80) {
+            std::array<wchar_t, 8> hex{};
+            swprintf_s(hex.data(), hex.size(), L"%%%02X", static_cast<unsigned>(c));
+            out += hex.data();
+        } else {
+            out += L'_';  // non-ASCII never appears in symbols or crumbs
+        }
+    }
+    return out;
 }
 
 } // namespace st

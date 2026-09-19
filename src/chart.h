@@ -2,25 +2,38 @@
 #pragma once
 
 #include "common.h"
-
-#include <windows.h>
-#include <objidl.h>  // IStream/PROPID for gdiplus.h (excluded by WIN32_LEAN_AND_MEAN)
-
-#include <algorithm>
-using std::max;  // gdiplus.h expects min/max in scope (NOMINMAX is defined)
-using std::min;
-#pragma warning(push, 1)
-#include <gdiplus.h>
-#pragma warning(pop)
+#include "gdiplus_inc.h"
+#include "theme.h"
 
 namespace st {
 
+struct ChartOptions {
+    bool candles   = false;
+    bool sma20     = false;
+    bool sma50     = false;
+    bool bollinger = false;
+    bool rsi       = false;
+    bool inset     = true;
+};
+
+// One line in the compare overlay.
+struct CompareEntry {
+    const QuoteData* data   = nullptr;
+    const wchar_t*   symbol = nullptr;
+};
+
 struct ChartInput {
-    const QuoteData* data    = nullptr;  // nullptr while loading
-    const RangeSpec* range   = nullptr;
-    bool             candles = false;
-    int              hoverX  = -1;       // px relative to chart rect, -1 = none
-    int              hoverY  = -1;
+    const QuoteData* data       = nullptr;  // nullptr while loading
+    const RangeSpec* range      = nullptr;
+    ChartOptions     opts;
+    const QuoteData* inset      = nullptr;  // trend inset data (nullptr = loading/off)
+    const wchar_t*   insetLabel = nullptr;  // e.g. L"1Y"
+    bool             compare    = false;    // draw `entries` as % change instead of `data`
+    const CompareEntry* entries = nullptr;
+    size_t           entryCount = 0;
+    int              hoverX     = -1;       // px relative to chart rect, -1 = none
+    int              hoverY     = -1;
+    const Theme*     theme      = nullptr;
 };
 
 // Draws the chart into `rc`. `scale` is the DPI factor (1.0 = 96 dpi).

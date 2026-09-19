@@ -29,7 +29,7 @@ struct Series {
     std::array<Candle, kMaxPoints> pts{};
 };
 
-// Fields lifted from the provider's "meta" block.
+// Fields lifted from the provider's chart "meta" block.
 struct QuoteMeta {
     std::wstring currency;
     std::wstring exchange;
@@ -53,6 +53,33 @@ struct QuoteData {
     Series       series;
 };
 
+// Fundamentals from the (optional) batch quote endpoint. Zero = unknown.
+struct QuoteStats {
+    bool         valid = false;
+    std::wstring symbol;
+    double marketCap        = 0.0;
+    double trailingPE       = 0.0;
+    double forwardPE        = 0.0;
+    double eps              = 0.0;
+    double dividendYieldPct = 0.0;  // percent, e.g. 3.9
+    double dividendRate     = 0.0;  // annual, per share
+    double avgVolume3M      = 0.0;
+    double priceToBook      = 0.0;
+    double open             = 0.0;
+    double prevClose        = 0.0;
+};
+
+// Per-ticker user data kept in stocktool.cfg.
+struct Holding {
+    double qty  = 0.0;  // shares held
+    double cost = 0.0;  // average cost per share
+};
+
+struct Alert {
+    double above = 0.0;  // 0 = unset
+    double below = 0.0;
+};
+
 // Chart range presets. The interval is chosen so the point count stays
 // well under kMaxPoints.
 struct RangeSpec {
@@ -72,6 +99,9 @@ constexpr std::array<RangeSpec, 8> kRanges = {{
     { L"5Y",  L"5y",  L"1wk", false },
     { L"MAX", L"max", L"1mo", false },
 }};
+
+constexpr size_t kRange1Y = 5;
+constexpr size_t kRange5Y = 6;
 
 // Daily bars over the last week: enough for last price, previous close and
 // today's open/high/low/volume in the list and stats panel.

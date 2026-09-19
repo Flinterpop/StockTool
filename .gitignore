@@ -14,6 +14,8 @@
 !/src/*.ico
 !/tools/
 !/tools/*.py
+!/tests/
+!/tests/*.cpp
 
 # ---- Generated (last match wins) -------------------------------------------
 build/

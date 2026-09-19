@@ -1,6 +1,5 @@
 #include "fetcher.h"
 
-#include "http.h"
 #include "quote_parser.h"
 
 #include <process.h>
@@ -9,6 +8,11 @@
 
 namespace st {
 namespace {
+
+// Yahoo's fundamentals endpoint wants a session cookie plus a "crumb" tied
+// to it. These two URLs establish them; both are provider-specific.
+constexpr wchar_t kCookieUrl[] = L"https://fc.yahoo.com/";
+constexpr wchar_t kCrumbUrl[]  = L"https://query1.finance.yahoo.com/v1/test/getcrumb";
 
 // Replaces every occurrence of `from` with `to` (bounded).
 void ReplaceAll(std::wstring& s, const wchar_t* from, const std::wstring& to) {
@@ -39,7 +43,9 @@ bool Fetcher::Start(HWND notify, const Config& cfg, std::wstring& err) {
     buf_       = std::make_unique<char[]>(kHttpBufSize);
     scratch_   = std::make_unique<QuoteData>();
     summaries_ = std::make_unique<std::array<QuoteData, kMaxStocks>>();
-    chart_     = std::make_unique<QuoteData>();
+    charts_    = std::make_unique<std::array<QuoteData, kMaxStocks>>();
+    inset_     = std::make_unique<QuoteData>();
+    quotes_    = std::make_unique<std::array<QuoteStats, kMaxStocks>>();
     stop_      = false;
 
     unsigned id = 0;
@@ -79,7 +85,8 @@ void Fetcher::Run() {
     for (;;) {
         FetchJob job;
         if (!Pop(job)) { return; }
-        Process(job);
+        if (job.kind == JobKind::Quote) { ProcessQuote(job); }
+        else                            { Process(job); }
     }
 }
 
@@ -103,9 +110,10 @@ void Fetcher::UpdateConfig(const Config& cfg) {
 
 bool Fetcher::Enqueue(JobKind kind, size_t stock, size_t range) {
     assert(thread_ != nullptr);
+    assert(kind != JobKind::Quote);
     assert(stock < cfg_.stockCount);
     assert(range < kRanges.size());
-    if (stock >= cfg_.stockCount || range >= kRanges.size()) { return false; }
+    if (stock >= cfg_.stockCount || range >= kRanges.size() || kind == JobKind::Quote) { return false; }
     {
         std::lock_guard<std::mutex> lock(qMutex_);
         for (size_t k = 0; k < qCount_; ++k) {
@@ -115,7 +123,7 @@ bool Fetcher::Enqueue(JobKind kind, size_t stock, size_t range) {
             }
         }
         if (qCount_ >= kMaxJobs) { return false; }
-        const RangeSpec& spec = (kind == JobKind::Chart) ? kRanges[range] : kSummarySpec;
+        const RangeSpec& spec = (kind == JobKind::Summary) ? kSummarySpec : kRanges[range];
         FetchJob& slot = queue_[(qHead_ + qCount_) % kMaxJobs];
         slot.kind   = kind;
         slot.stock  = stock;
@@ -128,10 +136,38 @@ bool Fetcher::Enqueue(JobKind kind, size_t stock, size_t range) {
     return true;
 }
 
+bool Fetcher::EnqueueQuote() {
+    assert(thread_ != nullptr);
+    if (cfg_.quoteUrlTemplate.empty() || cfg_.stockCount == 0) { return false; }
+    std::wstring symbols;
+    for (size_t i = 0; i < cfg_.stockCount; ++i) {
+        if (i > 0) { symbols += L","; }
+        symbols += UrlEncode(cfg_.stocks[i].symbol);
+    }
+    std::wstring url = cfg_.quoteUrlTemplate;
+    ReplaceAll(url, L"{symbols}", symbols);  // {crumb} is filled in by the worker
+    {
+        std::lock_guard<std::mutex> lock(qMutex_);
+        for (size_t k = 0; k < qCount_; ++k) {
+            if (queue_[(qHead_ + k) % kMaxJobs].kind == JobKind::Quote) { return true; }
+        }
+        if (qCount_ >= kMaxJobs) { return false; }
+        FetchJob& slot = queue_[(qHead_ + qCount_) % kMaxJobs];
+        slot.kind   = JobKind::Quote;
+        slot.stock  = 0;
+        slot.range  = 0;
+        slot.symbol = L"*";
+        slot.url    = url;
+        ++qCount_;
+    }
+    qCv_.notify_one();
+    return true;
+}
+
 std::wstring Fetcher::BuildUrl(const std::wstring& symbol, const RangeSpec& spec) const {
     assert(!symbol.empty());
     std::wstring url = cfg_.urlTemplate;
-    ReplaceAll(url, L"{symbol}",   symbol);
+    ReplaceAll(url, L"{symbol}",   UrlEncode(symbol));
     ReplaceAll(url, L"{range}",    spec.range);
     ReplaceAll(url, L"{interval}", spec.interval);
     return url;
@@ -142,7 +178,7 @@ bool Fetcher::Fetch(const std::wstring& url, QuoteData& out) {
     HttpResult   res;
     std::wstring err;
     out = QuoteData{};
-    if (!HttpGetUrl(url, buf_.get(), kHttpBufSize, res, err)) {
+    if (!http_.Get(url, buf_.get(), kHttpBufSize, res, err)) {
         out.error = err;
         return false;
     }
@@ -162,20 +198,90 @@ void Fetcher::Process(const FetchJob& job) {
     const bool ok = Fetch(job.url, *scratch_);
     (void)ok;  // failure is reported through QuoteData::error
     scratch_->symbol = job.symbol;
+    UINT msg = WM_APP_SUMMARY_READY;
     {
         std::lock_guard<std::mutex> lock(dataMutex_);
-        if (job.kind == JobKind::Summary) {
+        switch (job.kind) {
+        case JobKind::Summary:
             (*summaries_)[job.stock] = *scratch_;
-        } else {
-            *chart_     = *scratch_;
-            chartStock_ = job.stock;
-            chartRange_ = job.range;
-            chartValid_ = true;
+            break;
+        case JobKind::Chart:
+            (*charts_)[job.stock]  = *scratch_;
+            chartRange_[job.stock] = job.range;
+            chartValid_[job.stock] = true;
+            msg = WM_APP_CHART_READY;
+            break;
+        case JobKind::Inset:
+            *inset_      = *scratch_;
+            inset_stock_ = job.stock;
+            inset_range_ = job.range;
+            inset_valid_ = true;
+            msg = WM_APP_INSET_READY;
+            break;
+        case JobKind::Quote:
+            assert(false);  // handled by ProcessQuote
+            break;
         }
     }
-    const UINT msg = (job.kind == JobKind::Summary) ? WM_APP_SUMMARY_READY : WM_APP_CHART_READY;
     const BOOL posted = PostMessageW(notify_, msg, static_cast<WPARAM>(job.stock),
                                      static_cast<LPARAM>(job.range));
+    assert(posted);
+    (void)posted;
+}
+
+bool Fetcher::EnsureCrumb(std::wstring& err) {
+    if (!crumb_.empty()) { return true; }
+    HttpResult res;
+    // Any status is fine here; the point is the Set-Cookie the session keeps.
+    if (!http_.Get(kCookieUrl, buf_.get(), kHttpBufSize, res, err)) { return false; }
+    if (!http_.Get(kCrumbUrl, buf_.get(), kHttpBufSize, res, err)) { return false; }
+    if (res.status != 200 || res.length == 0 || res.length > 64) {
+        err = L"crumb request returned HTTP " + std::to_wstring(res.status);
+        return false;
+    }
+    std::wstring crumb;
+    for (size_t i = 0; i < res.length; ++i) {
+        const char c = buf_[i];
+        if (c == '\r' || c == '\n' || c == ' ' || c == '"') { continue; }
+        crumb += static_cast<wchar_t>(static_cast<unsigned char>(c));
+    }
+    if (crumb.empty() || crumb.find(L'<') != std::wstring::npos) {
+        err = L"crumb request returned unexpected content";
+        return false;
+    }
+    crumb_ = crumb;
+    assert(!crumb_.empty());
+    return true;
+}
+
+void Fetcher::ProcessQuote(const FetchJob& job) {
+    assert(job.kind == JobKind::Quote && !job.url.empty());
+    std::wstring err;
+    size_t       count = 0;
+    bool         ok    = false;
+    std::array<QuoteStats, kMaxStocks>& out = *quotes_;
+    // One retry with a fresh crumb if the first attempt is rejected.
+    for (int attempt = 0; attempt < 2 && !ok; ++attempt) {
+        if (!EnsureCrumb(err)) { break; }
+        std::wstring url = job.url;
+        ReplaceAll(url, L"{crumb}", UrlEncode(crumb_));
+        HttpResult res;
+        if (!http_.Get(url, buf_.get(), kHttpBufSize, res, err)) { break; }
+        if (res.status == 401 || res.status == 403) {
+            crumb_.clear();
+            err = L"HTTP " + std::to_wstring(res.status) + L" from fundamentals endpoint";
+            continue;
+        }
+        std::lock_guard<std::mutex> lock(dataMutex_);
+        ok = ParseQuoteBatchJson(buf_.get(), res.length, out, count, err);
+        if (!ok && res.status != 200) { err = L"HTTP " + std::to_wstring(res.status) + L": " + err; }
+    }
+    {
+        std::lock_guard<std::mutex> lock(dataMutex_);
+        quoteCount_ = ok ? count : 0;
+        quoteError_ = ok ? L"" : err;
+    }
+    const BOOL posted = PostMessageW(notify_, WM_APP_QUOTE_READY, 0, 0);
     assert(posted);
     (void)posted;
 }
@@ -189,10 +295,28 @@ bool Fetcher::CopySummary(size_t stock, QuoteData& out) {
 }
 
 bool Fetcher::CopyChart(size_t stock, size_t range, QuoteData& out) {
-    if (!chart_) { return false; }
+    assert(stock < kMaxStocks);
+    if (stock >= kMaxStocks || !charts_) { return false; }
     std::lock_guard<std::mutex> lock(dataMutex_);
-    if (!chartValid_ || chartStock_ != stock || chartRange_ != range) { return false; }
-    out = *chart_;
+    if (!chartValid_[stock] || chartRange_[stock] != range) { return false; }
+    out = (*charts_)[stock];
+    return true;
+}
+
+bool Fetcher::CopyInset(size_t stock, size_t range, QuoteData& out) {
+    if (!inset_) { return false; }
+    std::lock_guard<std::mutex> lock(dataMutex_);
+    if (!inset_valid_ || inset_stock_ != stock || inset_range_ != range) { return false; }
+    out = *inset_;
+    return true;
+}
+
+bool Fetcher::CopyQuotes(std::array<QuoteStats, kMaxStocks>& out, size_t& count, std::wstring& err) {
+    if (!quotes_) { return false; }
+    std::lock_guard<std::mutex> lock(dataMutex_);
+    out   = *quotes_;
+    count = quoteCount_;
+    err   = quoteError_;
     return true;
 }
 

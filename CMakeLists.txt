@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 # Single source of truth for the version: it flows into the code
 # (STOCKTOOL_VERSION*) and the exe's VERSIONINFO resource from here.
-project(StockTool VERSION 0.1.3 LANGUAGES CXX RC)
+project(StockTool VERSION 0.2.0 LANGUAGES CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -11,20 +11,9 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 find_package(nlohmann_json CONFIG REQUIRED)
+find_package(Catch2 CONFIG)
 
-add_executable(StockTool WIN32
-    src/main.cpp
-    src/app.cpp
-    src/chart.cpp
-    src/config.cpp
-    src/fetcher.cpp
-    src/http.cpp
-    src/quote_parser.cpp
-    src/textfmt.cpp
-    src/StockTool.rc
-)
-
-target_compile_definitions(StockTool PRIVATE
+set(ST_DEFINES
     UNICODE _UNICODE
     WIN32_LEAN_AND_MEAN
     NOMINMAX
@@ -37,13 +26,35 @@ target_compile_definitions(StockTool PRIVATE
 
 # Power of 10: strictest warnings, treated as errors. Third-party headers
 # (vcpkg) are pulled in as SYSTEM includes so /external:W0 silences them.
-target_compile_options(StockTool PRIVATE
-    /W4 /WX /permissive- /utf-8 /EHsc /external:W0 /Zc:__cplusplus
-)
+set(ST_OPTIONS /W4 /WX /permissive- /utf-8 /EHsc /external:W0 /Zc:__cplusplus)
 
+# ---- UI-free core: parsing, config, formatting, indicators (unit-tested) ----
+add_library(stocktool_core STATIC
+    src/config.cpp
+    src/http.cpp
+    src/indicators.cpp
+    src/quote_parser.cpp
+    src/textfmt.cpp
+)
+target_include_directories(stocktool_core PUBLIC src)
+target_compile_definitions(stocktool_core PUBLIC ${ST_DEFINES})
+target_compile_options(stocktool_core PRIVATE ${ST_OPTIONS})
+target_link_libraries(stocktool_core PUBLIC nlohmann_json::nlohmann_json winhttp)
+
+# ---- Application -----------------------------------------------------------
+add_executable(StockTool WIN32
+    src/main.cpp
+    src/app.cpp
+    src/chart.cpp
+    src/dialogs.cpp
+    src/fetcher.cpp
+    src/theme.cpp
+    src/StockTool.rc
+)
+target_compile_options(StockTool PRIVATE ${ST_OPTIONS})
 target_link_libraries(StockTool PRIVATE
-    nlohmann_json::nlohmann_json
-    winhttp gdiplus comctl32
+    stocktool_core
+    gdiplus comctl32 dwmapi uxtheme shell32 advapi32
 )
 
 # Ship the default config next to the executable.
@@ -51,3 +62,19 @@ add_custom_command(TARGET StockTool POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_SOURCE_DIR}/stocktool.cfg" "$<TARGET_FILE_DIR:StockTool>/stocktool.cfg"
 )
+
+# ---- Tests -----------------------------------------------------------------
+if(Catch2_FOUND)
+    enable_testing()
+    add_executable(stocktool_tests
+        tests/test_config.cpp
+        tests/test_indicators.cpp
+        tests/test_quote_parser.cpp
+        tests/test_textfmt.cpp
+    )
+    target_compile_options(stocktool_tests PRIVATE ${ST_OPTIONS})
+    target_link_libraries(stocktool_tests PRIVATE stocktool_core Catch2::Catch2WithMain)
+    add_test(NAME stocktool_tests COMMAND stocktool_tests)
+else()
+    message(STATUS "Catch2 not found - tests disabled")
+endif()

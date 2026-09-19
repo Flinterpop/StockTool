@@ -2,47 +2,57 @@
 
 [![Release][release-badge]][release-latest]
 
-[release-badge]: https://img.shields.io/badge/release-v0.1.3-blue
+[release-badge]: https://img.shields.io/badge/release-v0.2.0-blue
 [release-latest]: https://github.com/Flinterpop/StockTool/releases/latest
 
 *Last updated: 19 Sep 2026*
 
-A small Win32 C++ desktop app that tracks a configurable list of stocks and shows the usual quote-page views: price chart (line or candles) with range presets, volume bars, hover crosshair, day/52-week stats, and a watch list with last price and day change. No MFC, no frameworks — plain Win32, GDI+, WinHTTP, and `nlohmann/json` from vcpkg.
+A Win32 C++ desktop app that tracks a configurable list of stocks and shows the usual quote-page views: price chart (line or candles) with range presets, SMA/Bollinger/RSI indicators, a 1Y/5Y trend inset, a compare-all overlay, volume bars, hover crosshair, day/52-week/fundamentals stats, a watch list with last price and day change, portfolio value, price alerts, a tray icon and a light/dark theme. No MFC, no frameworks — plain Win32, GDI+, WinHTTP, and `nlohmann/json` from vcpkg.
 
 ## Configuration
 
-Tickers live in `stocktool.cfg` next to the executable (created with defaults on first run if missing). It is a plain INI file read with `GetPrivateProfile*`, so keep it ASCII.
+Everything lives in `stocktool.cfg` next to the executable (created with defaults on first run if missing). It is a plain INI file read with `GetPrivateProfile*`, so keep it ASCII. You rarely need to edit it by hand: the **Ticker** menu, the buttons under the watch list and **View > Theme** all write through to it, and **Reload cfg** re-reads it after a hand edit without a restart.
 
 ```ini
 [settings]
 refresh_seconds=60        ; 10..3600
-default_range=1Y          ; 1D 5D 1M 6M YTD 1Y 5Y MAX
+default_range=1Y          ; 1D 5D 1M 6M YTD 1Y 5Y MAX (the last-used range wins once saved)
+inset_range=1Y            ; trend inset: 1Y or 5Y
+theme=system              ; system | light | dark
+start_minimized=0
+minimize_to_tray=0
 url_template=https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range={range}&interval={interval}&includePrePost=false
+quote_url_template=https://query2.finance.yahoo.com/v7/finance/quote?symbols={symbols}&crumb={crumb}
 
 [stocks]
 RY.TO=Royal Bank of Canada
 DOL.TO=Dollarama Inc.
-BMO.TO=Bank of Montreal
-BNS.TO=Bank of Nova Scotia
-BN.TO=Brookfield Corporation
+
+[holdings]                ; symbol=shares,average cost
+RY.TO=100,250
+
+[alerts]                  ; symbol=above,below  (0 = unset)
+RY.TO=300,0
+
+[state]                   ; written by the app on exit: window placement, range, toggles, selection
 ```
 
-- You don't have to edit the file by hand: **Add… (Ctrl+N)** and **Remove** under the watch list write through to it and take effect immediately. If you do edit it by hand while the app is running, **Reload cfg** re-reads it (tickers, refresh interval and URL template) without a restart.
 - Symbols use Yahoo Finance notation: `.TO` for TSX, `.V` for TSX Venture, bare symbol for NYSE/Nasdaq; class shares use a dash (`BRK-B`, `RCI-B.TO`). TMX Group is the company that owns the Toronto Stock Exchange; the exchange was abbreviated TSE until 2002 and is TSX now, so `money.tmx.com/en/quote/RY` and `RY.TO` are the same listing.
-- Up to 32 symbols; extra entries are ignored.
-- `url_template` is substituted with `{symbol}`, `{range}` and `{interval}` at run time, so another provider with the same JSON shape can be dropped in without a rebuild.
+- Up to 32 symbols; extra entries are ignored. The order in `[stocks]` is the list order (Ticker > Move up/down rewrites the section).
+- `url_template` (chart bars) is substituted with `{symbol}`, `{range}` and `{interval}`; `quote_url_template` (fundamentals) with `{symbols}` (comma-separated) and `{crumb}`. Leave `quote_url_template` empty to disable fundamentals.
 
-## Building
+## Building and testing
 
-Requires Visual Studio 2026 (MSVC), CMake 3.25+, and vcpkg at `C:\vcpkg` with `nlohmann-json:x64-windows-static` installed.
+Requires Visual Studio 2026 (MSVC), CMake 3.25+, and vcpkg at `C:\vcpkg` with `nlohmann-json` and `catch2` for `x64-windows-static`.
 
 ```powershell
 cmake --preset default
 cmake --build --preset release      # or: --preset debug
 build\Release\StockTool.exe
+build\Release\stocktool_tests.exe   # Catch2 unit tests (parser, config, indicators, formatting)
 ```
 
-The build uses `/W4 /WX /permissive-` and the static CRT (vcpkg `x64-windows-static`), so the exe has no VC++ redistributable dependency.
+The build uses `/W4 /WX /permissive-` and the static CRT (vcpkg `x64-windows-static`), so the exe has no VC++ redistributable dependency. The UI-free parts are a static library (`stocktool_core`) shared by the app and the tests.
 
 ## Releasing
 
@@ -53,27 +63,34 @@ The version is set once, in `project(StockTool VERSION x.y.z)` in `CMakeLists.tx
 | File | Role |
 |---|---|
 | `src/main.cpp` | Entry point: DPI awareness, GDI+ start/stop, creates `App`. |
-| `src/app.*` | Main window, controls, layout, painting of header/stats/status/list items. |
-| `src/chart.*` | GDI+ chart renderer: price grid, date axis, line/area or candles, volume, last-price tag, hover tooltip. |
-| `src/fetcher.*` | Worker thread with a bounded job queue; posts `WM_APP_*` messages to the UI thread. |
-| `src/http.*` | Blocking HTTPS GET on WinHTTP into a caller-supplied buffer. |
-| `src/quote_parser.*` | Provider JSON to `QuoteData` (meta + OHLCV bars). |
-| `src/config.*` | `stocktool.cfg` reading and default-file creation. |
-| `src/textfmt.*` | Price/change/volume/date formatting. |
+| `src/app.*` | Main window, menu, controls, layout, tray icon, alerts, portfolio, painting of header/stats/status/list items. |
+| `src/dialogs.*` | Add ticker, Holding and Alerts dialogs. |
+| `src/chart.*` | GDI+ chart renderer: price grid, date axis, line/area or candles, SMA/Bollinger overlays, RSI pane, volume, last-price tag, trend inset, compare overlay, hover tooltip. |
+| `src/indicators.*` | SMA, Bollinger bands, RSI (pure functions, unit-tested). |
+| `src/theme.*` | Light/dark palettes, Windows theme preference, compare-series colours. |
+| `src/fetcher.*` | Worker thread with a bounded job queue; posts `WM_APP_*` messages to the UI thread; cookie/crumb handshake for fundamentals. |
+| `src/http.*` | Blocking HTTPS GET on WinHTTP with a persistent session (cookies). |
+| `src/quote_parser.*` | Provider JSON to `QuoteData` (meta + OHLCV bars) and `QuoteStats` (fundamentals). |
+| `src/config.*` | `stocktool.cfg` reading/writing: settings, stocks, holdings, alerts, view state. |
+| `src/textfmt.*` | Price/money/percent/compact/date formatting. |
 | `src/common.h` | Fixed-capacity data types and the range presets. |
-| `src/StockTool.rc`, `src/resource.h` | Version resource and the app icon (`src/StockTool.ico`). |
+| `src/StockTool.rc`, `src/resource.h` | Version resource, app icon (`src/StockTool.ico`), menu and dialog templates. |
 | `tools/make_icon.py` | Regenerates the multi-size `.ico` with Pillow: `python tools/make_icon.py`. |
+| `tests/*.cpp` | Catch2 tests for the core library. |
 
 Notes:
 
-- Two kinds of fetch: a **summary** (`5d` daily bars) for every symbol feeds the list and the stats panel; a **chart** fetch for the selected symbol/range feeds the plot. Duplicate queued jobs are coalesced.
+- Fetch kinds: a **summary** (`5d` daily bars) per symbol feeds the list, tray tooltip, portfolio and stats; a **chart** fetch per symbol/range feeds the plot (all symbols when Compare is on); an **inset** fetch (1Y or 5Y) feeds the trend box; one batch **quote** fetch feeds market cap / P/E / yield. Jobs carry their symbol and fully built URL, and results echo the symbol, so the worker never reads configuration and a list change mid-fetch cannot put data in the wrong row.
+- The fundamentals endpoint needs a session cookie and a "crumb"; the worker obtains both on first use and retries once with a fresh crumb on 401/403. If the provider changes this, fundamentals show `-` and the status line says why; the chart still works.
 - Day change is derived from the daily bars: if the newest bar is today's, previous close is the bar before it; otherwise the newest bar is the previous close.
-- Per-monitor DPI v2 aware; everything is laid out from a DPI scale factor.
+- Alerts fire once when the price crosses the level (tray balloon + status line + amber row), and re-arm when it crosses back.
+- Per-monitor DPI v2 aware; everything is laid out from a DPI scale factor. Dark mode covers the client area, title bar and buttons; the Win32 menu bar and dialogs stay light.
 - Written to the NASA/JPL Power of 10 style: fixed-size arrays (`kMaxStocks`, `kMaxPoints`), bounded loops, asserts on preconditions, no recursion, warnings as errors. The only unbounded loops are the message pump and the worker's service loop, both of which end on shutdown.
 
 ## Usage
 
-- Click a symbol in the list to select it; range buttons switch the chart range; **Candles** toggles line/candlestick; **Refresh (F5)** re-fetches everything now. Prices auto-refresh on the configured interval.
-- **Add… (Ctrl+N)** opens a small dialog for a symbol and optional display name (validated, upper-cased, duplicates rejected); **Remove** drops the selected symbol. Both update `stocktool.cfg` in place. The list always keeps at least one symbol.
-- **Reload cfg** re-reads `stocktool.cfg` after a hand edit. The selected symbol stays selected if it is still listed; a file that fails to parse is reported in the status line and the running configuration is kept.
-- Hover over the chart for a crosshair with date, O/H/L/C and volume.
+- Click a symbol to select it; range buttons switch the chart range; **Candles** toggles line/candlestick; **Compare** overlays every ticker as % change over the range; **Refresh (F5)** re-fetches everything now. Prices auto-refresh on the configured interval.
+- **View** menu: SMA 20, SMA 50, Bollinger bands (20, 2σ), RSI (14) pane, the trend inset, theme (system/light/dark) and minimize-to-tray. All toggles are remembered.
+- **Ticker** menu (also right-click on the list): **Add… (Ctrl+N)**, **Remove**, **Move up/down (Ctrl+Up/Down)**, **Holding…** (shares + average cost → portfolio strip above the list, holding line in the header) and **Alerts…** (price above/below).
+- Hover over the chart for a crosshair with date, O/H/L/C, volume and RSI; in Compare mode the tooltip lists every ticker's % change at that date.
+- The tray icon's tooltip shows every ticker's last price; left-click shows the window, right-click gives Show / Refresh / Exit.

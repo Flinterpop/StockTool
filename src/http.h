@@ -12,9 +12,27 @@ struct HttpResult {
     size_t   length = 0;   // bytes written to the caller's buffer
 };
 
-// Fetches `url` into `buf` (capacity `cap`). Returns false on transport
-// failure or if the body does not fit; `err` describes why.
-bool HttpGetUrl(const std::wstring& url, char* buf, size_t cap,
-                HttpResult& out, std::wstring& err);
+// One WinHTTP session, reused across requests so cookies persist (the
+// fundamentals endpoint needs a cookie + crumb pair). Not thread-safe:
+// owned and used by the worker thread only.
+class HttpClient {
+public:
+    HttpClient() = default;
+    ~HttpClient();
+    HttpClient(const HttpClient&) = delete;
+    HttpClient& operator=(const HttpClient&) = delete;
+
+    // Fetches `url` into `buf` (capacity `cap`). Returns false on transport
+    // failure or if the body does not fit; `err` describes why. Any HTTP
+    // status counts as success here; the caller inspects `out.status`.
+    bool Get(const std::wstring& url, char* buf, size_t cap, HttpResult& out, std::wstring& err);
+
+private:
+    bool EnsureSession(std::wstring& err);
+    void* session_ = nullptr;   // HINTERNET
+};
+
+// Percent-encodes everything except unreserved characters.
+std::wstring UrlEncode(const std::wstring& s);
 
 } // namespace st

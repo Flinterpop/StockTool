@@ -4,7 +4,10 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <cassert>
+
+using std::min;
 
 namespace st {
 namespace {
@@ -142,6 +145,65 @@ bool ParseChartJson(const char* data, size_t len, QuoteData& out, std::wstring& 
     if (!ParseSeries(r, out.series, err)) { return false; }
     out.valid = true;
     assert(err.empty() || !out.valid);
+    return true;
+}
+
+bool ParseQuoteBatchJson(const char* data, size_t len,
+                         std::array<QuoteStats, kMaxStocks>& out, size_t& count, std::wstring& err) {
+    assert(data != nullptr);
+    count = 0;
+    if (len == 0) {
+        err = L"Empty response";
+        return false;
+    }
+    const json doc = json::parse(data, data + len, nullptr, false);
+    if (doc.is_discarded()) {
+        err = L"Response is not valid JSON";
+        return false;
+    }
+    const json* qr = Child(doc, "quoteResponse");
+    if (qr == nullptr) {
+        // Yahoo reports auth problems as {"finance":{"error":{...}}}.
+        const json* fin  = Child(doc, "finance");
+        const json* ferr = (fin != nullptr) ? Child(*fin, "error") : nullptr;
+        err = (ferr != nullptr) ? L"Provider: " + StrOr(*ferr, "description", L"unknown error")
+                                : L"Response has no quoteResponse block";
+        return false;
+    }
+    const json* perr = Child(*qr, "error");
+    if (perr != nullptr) {
+        err = L"Provider: " + StrOr(*perr, "description", L"unknown error");
+        return false;
+    }
+    const json* results = Child(*qr, "result");
+    if (results == nullptr || !results->is_array()) {
+        err = L"Response has no result";
+        return false;
+    }
+    const size_t n = min(results->size(), kMaxStocks);
+    for (size_t i = 0; i < n; ++i) {
+        const json& r = (*results)[i];
+        QuoteStats& s = out[count];
+        s = QuoteStats{};
+        s.symbol = StrOr(r, "symbol", L"");
+        if (s.symbol.empty()) { continue; }
+        s.marketCap        = NumOr(r, "marketCap", 0.0);
+        s.trailingPE       = NumOr(r, "trailingPE", 0.0);
+        s.forwardPE        = NumOr(r, "forwardPE", 0.0);
+        s.eps              = NumOr(r, "epsTrailingTwelveMonths", 0.0);
+        s.dividendYieldPct = NumOr(r, "dividendYield", 0.0);
+        if (s.dividendYieldPct <= 0.0) {
+            s.dividendYieldPct = NumOr(r, "trailingAnnualDividendYield", 0.0) * 100.0;
+        }
+        s.dividendRate     = NumOr(r, "trailingAnnualDividendRate", 0.0);
+        s.avgVolume3M      = NumOr(r, "averageDailyVolume3Month", 0.0);
+        s.priceToBook      = NumOr(r, "priceToBook", 0.0);
+        s.open             = NumOr(r, "regularMarketOpen", 0.0);
+        s.prevClose        = NumOr(r, "regularMarketPreviousClose", 0.0);
+        s.valid = true;
+        ++count;
+    }
+    assert(count <= kMaxStocks);
     return true;
 }
 
