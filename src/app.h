@@ -40,6 +40,7 @@ private:
     void OnChartReady(size_t stock, size_t range);
     void OnAddTicker();
     void OnRemoveTicker();
+    void OnReloadConfig();
 
     // helpers
     void CreateControls();
@@ -75,6 +76,7 @@ private:
     HWND      hRefreshBtn_ = nullptr;
     HWND      hAddBtn_     = nullptr;
     HWND      hRemoveBtn_  = nullptr;
+    HWND      hReloadBtn_  = nullptr;
     HFONT     hUiFont_     = nullptr;
     HACCEL    hAccel_      = nullptr;
 

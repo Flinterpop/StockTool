@@ -25,6 +25,7 @@ constexpr int IDC_STYLE      = 300;
 constexpr int IDC_REFRESH    = 301;
 constexpr int IDC_ADD        = 302;
 constexpr int IDC_REMOVE     = 303;
+constexpr int IDC_RELOAD     = 304;
 
 constexpr UINT_PTR kRefreshTimer = 1;
 
@@ -345,7 +346,7 @@ void App::CreateFonts() {
                            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                            DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
     assert(hUiFont_ != nullptr);
-    const HWND controls[] = { hList_, hStyleBtn_, hRefreshBtn_, hAddBtn_, hRemoveBtn_ };
+    const HWND controls[] = { hList_, hStyleBtn_, hRefreshBtn_, hAddBtn_, hRemoveBtn_, hReloadBtn_ };
     for (HWND h : controls) {
         if (h != nullptr) { SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(hUiFont_), TRUE); }
     }
@@ -388,7 +389,7 @@ void App::CreateControls() {
                                    hInst_, nullptr);
     assert(hStyleBtn_ != nullptr && hRefreshBtn_ != nullptr);
 
-    hAddBtn_ = CreateWindowExW(0, L"BUTTON", L"Add… (Ctrl+N)",
+    hAddBtn_ = CreateWindowExW(0, L"BUTTON", L"Add…",
                                WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_GROUP | BS_PUSHBUTTON,
                                0, 0, 10, 10, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_ADD)),
                                hInst_, nullptr);
@@ -396,7 +397,11 @@ void App::CreateControls() {
                                   WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                                   0, 0, 10, 10, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_REMOVE)),
                                   hInst_, nullptr);
-    assert(hAddBtn_ != nullptr && hRemoveBtn_ != nullptr);
+    hReloadBtn_ = CreateWindowExW(0, L"BUTTON", L"Reload cfg",
+                                  WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                  0, 0, 10, 10, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_RELOAD)),
+                                  hInst_, nullptr);
+    assert(hAddBtn_ != nullptr && hRemoveBtn_ != nullptr && hReloadBtn_ != nullptr);
     CreateFonts();  // apply font + item height to the controls just made
 }
 
@@ -412,9 +417,10 @@ void App::Layout() {
     MoveWindow(hList_, listRect_.left, listRect_.top,
                listRect_.right - listRect_.left, listRect_.bottom - listRect_.top, TRUE);
     const int listBtnY = h - m - listBtnH;
-    const int listBtnW = (Px(kListW) - Px(kBtnGap)) / 2;
+    const int listBtnW = (Px(kListW) - 2 * Px(kBtnGap)) / 3;
     MoveWindow(hAddBtn_, listRect_.left, listBtnY, listBtnW, listBtnH, TRUE);
-    MoveWindow(hRemoveBtn_, listRect_.right - listBtnW, listBtnY, listBtnW, listBtnH, TRUE);
+    MoveWindow(hRemoveBtn_, listRect_.left + listBtnW + Px(kBtnGap), listBtnY, listBtnW, listBtnH, TRUE);
+    MoveWindow(hReloadBtn_, listRect_.right - listBtnW, listBtnY, listBtnW, listBtnH, TRUE);
 
     const int rightX = listRect_.right + m;
     const int rightR = w - m;
@@ -479,7 +485,7 @@ void App::OnAddTicker() {
     (*summaries_)[index] = QuoteData{};
     SendMessageW(hList_, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(st.result.symbol.c_str()));
 
-    fetcher_.UpdateStocks(cfg_);   // drops pending jobs, so re-request everything
+    fetcher_.UpdateConfig(cfg_);   // drops pending jobs, so re-request everything
     RequestAllSummaries();
     SelectStock(index);
     SetStatus(L"Added " + st.result.symbol);
@@ -509,11 +515,43 @@ void App::OnRemoveTicker() {
     (*summaries_)[cfg_.stockCount]   = QuoteData{};
     SendMessageW(hList_, LB_DELETESTRING, static_cast<WPARAM>(index), 0);
 
-    fetcher_.UpdateStocks(cfg_);
+    fetcher_.UpdateConfig(cfg_);
     RequestAllSummaries();
     SelectStock((index < cfg_.stockCount) ? index : cfg_.stockCount - 1);
     SetStatus(L"Removed " + symbol);
     assert(cfg_.stockCount >= 1);
+}
+
+// Re-reads stocktool.cfg (tickers, refresh interval, URL template) without
+// restarting. Keeps the current selection if its symbol is still listed.
+void App::OnReloadConfig() {
+    assert(selected_ < cfg_.stockCount);
+    Config fresh;
+    std::wstring err;
+    if (!LoadConfig(cfg_.path, fresh, err)) {
+        SetStatus(L"Reload failed: " + err);   // keep running on the old config
+        return;
+    }
+    const std::wstring current = cfg_.stocks[selected_].symbol;
+    size_t newSel = 0;
+    for (size_t i = 0; i < fresh.stockCount; ++i) {
+        if (SameSymbol(fresh.stocks[i].symbol, current)) { newSel = i; }
+    }
+
+    cfg_ = fresh;
+    for (size_t i = 0; i < kMaxStocks; ++i) { (*summaries_)[i] = QuoteData{}; }
+    SendMessageW(hList_, LB_RESETCONTENT, 0, 0);
+    for (size_t i = 0; i < cfg_.stockCount; ++i) {
+        SendMessageW(hList_, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(cfg_.stocks[i].symbol.c_str()));
+    }
+    KillTimer(hwnd_, kRefreshTimer);
+    SetTimer(hwnd_, kRefreshTimer, cfg_.refreshSeconds * 1000u, nullptr);
+
+    fetcher_.UpdateConfig(cfg_);
+    RequestAllSummaries();
+    SelectStock(newSel);
+    SetStatus(L"Reloaded " + std::to_wstring(cfg_.stockCount) + L" tickers from " + cfg_.path);
+    assert(cfg_.stockCount >= 1 && newSel < cfg_.stockCount);
 }
 
 void App::SelectStock(size_t index) {
@@ -562,6 +600,8 @@ void App::OnCommand(WPARAM wp) {
         OnAddTicker();
     } else if (id == IDC_REMOVE && code == BN_CLICKED) {
         OnRemoveTicker();
+    } else if (id == IDC_RELOAD && code == BN_CLICKED) {
+        OnReloadConfig();
     }
 }
 

@@ -19,6 +19,7 @@ struct FetchJob {
     size_t       stock = 0;   // index into Config::stocks at enqueue time
     size_t       range = 0;   // index into kRanges (Chart only)
     std::wstring symbol;      // captured at enqueue time; the worker never reads Config
+    std::wstring url;         // likewise, built from the template at enqueue time
 };
 
 // Posted to the notify window when a job completes.
@@ -35,9 +36,9 @@ public:
     bool Start(HWND notify, const Config& cfg, std::wstring& err);
     void Stop();
 
-    // Replaces the stock list (UI thread). Pending jobs are dropped because
+    // Replaces the configuration (UI thread). Pending jobs are dropped because
     // their indices may no longer line up; the caller re-requests what it needs.
-    void UpdateStocks(const Config& cfg);
+    void UpdateConfig(const Config& cfg);
 
     // Queues a job for stock `stock` (duplicates are coalesced). False if the
     // queue is full or the index is out of range.
@@ -56,10 +57,9 @@ private:
     bool Fetch(const std::wstring& url, QuoteData& out);
     std::wstring BuildUrl(const std::wstring& symbol, const RangeSpec& spec) const;
 
-    HWND         notify_ = nullptr;
-    std::wstring urlTemplate_;   // immutable after Start(); read by the worker
-    Config       cfg_;           // UI-thread only after Start()
-    HANDLE       thread_ = nullptr;
+    HWND   notify_ = nullptr;
+    Config cfg_;                 // UI-thread only; the worker reads jobs, never this
+    HANDLE thread_ = nullptr;
 
     // Worker-only scratch space, allocated once in Start().
     std::unique_ptr<char[]>    buf_;

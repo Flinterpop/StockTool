@@ -27,7 +27,7 @@ BNS.TO=Bank of Nova Scotia
 BN.TO=Brookfield Corporation
 ```
 
-- You don't have to edit the file by hand: **Add… (Ctrl+N)** and **Remove** under the watch list write through to it and take effect immediately.
+- You don't have to edit the file by hand: **Add… (Ctrl+N)** and **Remove** under the watch list write through to it and take effect immediately. If you do edit it by hand while the app is running, **Reload cfg** re-reads it (tickers, refresh interval and URL template) without a restart.
 - Symbols use Yahoo Finance notation: `.TO` for TSX, `.V` for TSX Venture, bare symbol for NYSE/Nasdaq; class shares use a dash (`BRK-B`, `RCI-B.TO`). TMX Group is the company that owns the Toronto Stock Exchange; the exchange was abbreviated TSE until 2002 and is TSX now, so `money.tmx.com/en/quote/RY` and `RY.TO` are the same listing.
 - Up to 32 symbols; extra entries are ignored.
 - `url_template` is substituted with `{symbol}`, `{range}` and `{interval}` at run time, so another provider with the same JSON shape can be dropped in without a rebuild.
@@ -75,4 +75,5 @@ Notes:
 
 - Click a symbol in the list to select it; range buttons switch the chart range; **Candles** toggles line/candlestick; **Refresh (F5)** re-fetches everything now. Prices auto-refresh on the configured interval.
 - **Add… (Ctrl+N)** opens a small dialog for a symbol and optional display name (validated, upper-cased, duplicates rejected); **Remove** drops the selected symbol. Both update `stocktool.cfg` in place. The list always keeps at least one symbol.
+- **Reload cfg** re-reads `stocktool.cfg` after a hand edit. The selected symbol stays selected if it is still listed; a file that fails to parse is reported in the status line and the running configuration is kept.
 - Hover over the chart for a crosshair with date, O/H/L/C and volume.

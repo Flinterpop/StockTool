@@ -34,10 +34,9 @@ bool Fetcher::Start(HWND notify, const Config& cfg, std::wstring& err) {
         err = L"Fetcher already started";
         return false;
     }
-    notify_      = notify;
-    cfg_         = cfg;
-    urlTemplate_ = cfg.urlTemplate;
-    buf_         = std::make_unique<char[]>(kHttpBufSize);
+    notify_    = notify;
+    cfg_       = cfg;
+    buf_       = std::make_unique<char[]>(kHttpBufSize);
     scratch_   = std::make_unique<QuoteData>();
     summaries_ = std::make_unique<std::array<QuoteData, kMaxStocks>>();
     chart_     = std::make_unique<QuoteData>();
@@ -95,10 +94,9 @@ bool Fetcher::Pop(FetchJob& job) {
     return true;
 }
 
-void Fetcher::UpdateStocks(const Config& cfg) {
+void Fetcher::UpdateConfig(const Config& cfg) {
     assert(cfg.stockCount <= kMaxStocks);
-    cfg_.stocks     = cfg.stocks;
-    cfg_.stockCount = cfg.stockCount;
+    cfg_ = cfg;
     std::lock_guard<std::mutex> lock(qMutex_);
     qCount_ = 0;  // drop pending jobs; their indices may have shifted
 }
@@ -117,11 +115,13 @@ bool Fetcher::Enqueue(JobKind kind, size_t stock, size_t range) {
             }
         }
         if (qCount_ >= kMaxJobs) { return false; }
+        const RangeSpec& spec = (kind == JobKind::Chart) ? kRanges[range] : kSummarySpec;
         FetchJob& slot = queue_[(qHead_ + qCount_) % kMaxJobs];
         slot.kind   = kind;
         slot.stock  = stock;
         slot.range  = range;
         slot.symbol = cfg_.stocks[stock].symbol;
+        slot.url    = BuildUrl(slot.symbol, spec);
         ++qCount_;
     }
     qCv_.notify_one();
@@ -130,7 +130,7 @@ bool Fetcher::Enqueue(JobKind kind, size_t stock, size_t range) {
 
 std::wstring Fetcher::BuildUrl(const std::wstring& symbol, const RangeSpec& spec) const {
     assert(!symbol.empty());
-    std::wstring url = urlTemplate_;
+    std::wstring url = cfg_.urlTemplate;
     ReplaceAll(url, L"{symbol}",   symbol);
     ReplaceAll(url, L"{range}",    spec.range);
     ReplaceAll(url, L"{interval}", spec.interval);
@@ -158,9 +158,8 @@ bool Fetcher::Fetch(const std::wstring& url, QuoteData& out) {
 void Fetcher::Process(const FetchJob& job) {
     assert(job.stock < kMaxStocks);
     assert(job.range < kRanges.size());
-    assert(!job.symbol.empty());
-    const RangeSpec& spec = (job.kind == JobKind::Chart) ? kRanges[job.range] : kSummarySpec;
-    const bool ok = Fetch(BuildUrl(job.symbol, spec), *scratch_);
+    assert(!job.symbol.empty() && !job.url.empty());
+    const bool ok = Fetch(job.url, *scratch_);
     (void)ok;  // failure is reported through QuoteData::error
     scratch_->symbol = job.symbol;
     {
