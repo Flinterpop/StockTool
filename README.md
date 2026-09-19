@@ -2,7 +2,7 @@
 
 [![Release][release-badge]][release-latest]
 
-[release-badge]: https://img.shields.io/badge/release-v0.1.2-blue
+[release-badge]: https://img.shields.io/badge/release-v0.1.3-blue
 [release-latest]: https://github.com/Flinterpop/StockTool/releases/latest
 
 *Last updated: 19 Sep 2026*
