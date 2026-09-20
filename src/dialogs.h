@@ -32,4 +32,7 @@ bool RunHoldingDialog(HINSTANCE inst, HWND owner, const std::wstring& symbol, Ho
 // Edits `a` in place; returns true if the user pressed Save with valid input.
 bool RunAlertsDialog(HINSTANCE inst, HWND owner, const std::wstring& symbol, Alert& a);
 
+// Asks for a watch-list name (pre-filled with `name`); true on OK.
+bool RunListNameDialog(HINSTANCE inst, HWND owner, const std::wstring& title, std::wstring& name);
+
 } // namespace st

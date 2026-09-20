@@ -1,4 +1,4 @@
-// Main window: watch list, header, chart, stats, status line, tray icon.
+// Main window: watch lists, header, chart, news, stats, status line, tray icon.
 #pragma once
 
 #include "chart.h"
@@ -37,11 +37,18 @@ private:
         bool belowActive = false;
     };
     struct Portfolio {
-        bool         any = false;
-        double       value = 0.0;
-        double       cost  = 0.0;
-        double       day   = 0.0;
-        std::wstring currency;   // "" = mixed
+        bool         any     = false;
+        bool         partial = false;   // an FX rate is still missing
+        double       value   = 0.0;     // in cfg_.portfolioCurrency
+        double       cost    = 0.0;
+        double       day     = 0.0;
+        double       income  = 0.0;     // trailing-12-month dividends x shares
+    };
+    struct NewsCache {
+        std::array<NewsItem, kMaxNews> items{};
+        size_t       count = 0;
+        std::wstring error;
+        bool         valid = false;
     };
 
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
@@ -53,6 +60,7 @@ private:
     void OnSize(WPARAM wp);
     void OnPaint();
     void OnCommand(int id, UINT code);
+    LRESULT OnNotify(const NMHDR* hdr);
     void OnContextMenu(HWND source, int x, int y);
     void OnTimer();
     void OnMouseMove(int x, int y, bool buttonDown);
@@ -69,6 +77,8 @@ private:
     void OnChartReady(size_t stock, size_t range);
     void OnInsetReady(size_t stock, size_t range);
     void OnQuoteReady();
+    void OnFxReady();
+    void OnNewsReady(size_t stock);
 
     // ticker commands
     void OnAddTicker();
@@ -80,6 +90,17 @@ private:
     void OnEditHolding();
     void OnEditAlerts();
     void OnReloadConfig();
+    void OnExportList();
+    void OnExportChart();
+
+    // watch lists
+    void SwitchList(const std::wstring& name);
+    void OnNewList();
+    void OnRenameList();
+    void OnDeleteList();
+    void RebuildTabs();
+    void RebuildListMenu();
+    void ApplyConfig(const Config& fresh);   // swap in a freshly loaded config
 
     // view commands
     void ToggleOption(bool& flag);
@@ -88,54 +109,67 @@ private:
     void SyncViewMenu();
 
     // helpers
-    ChartInput BuildChartInput();               // from current state (hover included)
-    bool InsetHit(int x, int y, Gdiplus::RectF& box);  // client px -> inset box (chart px)
+    ChartInput BuildChartInput();
+    bool InsetHit(int x, int y, Gdiplus::RectF& box);
+    int  NewsRowAt(int x, int y) const;       // -1 when not over a headline
     void CreateControls();
     void CreateFonts();
     void Layout();
     void EnsureBackBuffer(HDC hdc, int w, int h);
     void FreeBackBuffer();
     void PaintChartLayer(Gdiplus::Graphics& g, const ChartInput& in);
-    void RedrawChart();                    // chart content changed: re-render base + repaint
-    void RedrawAll();                      // everything changed
-    void InvalidateListItem(size_t index); // one watch-list row, no erase (no flicker)
+    void RedrawChart();
+    void RedrawAll();
+    void InvalidateListItem(size_t index);
+    bool HasStocks() const { return cfg_.stockCount > 0; }
     void SelectStock(size_t index);
     void SelectRange(size_t index);
     void RequestChart(bool clearCurrent);
     void RequestInset(bool clearCurrent);
-    void PrefetchOthers();                 // background charts/insets for the other tickers
+    void RequestNews(bool clearCurrent);
+    void PrefetchOthers();
     void RequestAllSummaries();
     void RequestQuotes();
+    void EnsureFxRates();
     void RebuildList();
     void SetStatus(const std::wstring& text);
     void SaveState();
     void ApplyStartupState(int nCmdShow);
     int  Px(int dip) const;
-    PriceChange ComputeChange(const QuoteData& q) const;
-    Portfolio   ComputePortfolio() const;
+    PriceChange  ComputeChange(const QuoteData& q) const;
+    std::wstring CurrencyOf(size_t index) const;          // override or provider's
+    double       RateToPortfolio(const std::wstring& cur) const;   // NaN when unknown
+    double       TrailingDividends(size_t index) const;   // per share, last 365 days
+    Portfolio    ComputePortfolio() const;
     void CheckAlerts(size_t stock, const PriceChange& pc);
     void UpdateTrayTip();
     void ShowFromTray();
     void TrayBalloon(const std::wstring& title, const std::wstring& text);
+    bool SaveCsvDialog(const wchar_t* suggested, std::wstring& path);
+    bool WriteTextFile(const std::wstring& path, const std::string& utf8, std::wstring& err);
 
     // painting
     void PaintHeader(Gdiplus::Graphics& g);
     void PaintPortfolio(Gdiplus::Graphics& g);
+    void PaintNews(Gdiplus::Graphics& g);
     void PaintStats(Gdiplus::Graphics& g);
     void PaintStatus(Gdiplus::Graphics& g);
     void PaintListItem(Gdiplus::Graphics& g, const RECT& rc, size_t index, bool selected);
 
     // layout rectangles (client px)
+    RECT tabsRect_{};
     RECT portfolioRect_{};
     RECT listRect_{};
     RECT headerRect_{};
     RECT chartRect_{};
+    RECT newsRect_{};
     RECT statsRect_{};
     RECT statusRect_{};
 
     HINSTANCE hInst_ = nullptr;
     HWND      hwnd_  = nullptr;
     HWND      hList_ = nullptr;
+    HWND      hTabs_ = nullptr;
     HMENU     hMenu_ = nullptr;
     std::array<HWND, kRanges.size()> hRangeBtns_{};
     HWND      hStyleBtn_   = nullptr;
@@ -183,6 +217,8 @@ private:
     std::unique_ptr<QuoteData>                          incoming_;   // scratch for result copies
     std::unique_ptr<std::array<QuoteStats, kMaxStocks>> quotes_;
     size_t                                              quoteCount_ = 0;
+    std::unique_ptr<std::array<NewsCache, kMaxStocks>>  news_;
+    std::array<FxRate, kMaxFx>                          fx_{};
     std::array<AlertState, kMaxStocks>                  alerts_{};
     std::array<CompareEntry, kMaxStocks>                compareEntries_{};
 
@@ -191,7 +227,7 @@ private:
     int    hoverX_   = -1;
     int    hoverY_   = -1;
     bool   tracking_ = false;
-    bool   dragging_ = false;   // inset drag in progress (mouse captured)
+    bool   dragging_ = false;   // inset drag in progress
     float  dragDX_   = 0.0f;    // grab offset from the inset's top-left (px)
     float  dragDY_   = 0.0f;
     float  scale_    = 1.0f;

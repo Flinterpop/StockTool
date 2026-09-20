@@ -16,6 +16,9 @@ BEGIN
         MENUITEM "&Refresh now\tF5",       IDM_REFRESH
         MENUITEM "Re&load config",         IDM_RELOAD
         MENUITEM SEPARATOR
+        MENUITEM "Export &watch list (CSV)...", IDM_EXPORT_LIST
+        MENUITEM "Export &chart bars (CSV)...", IDM_EXPORT_CHART
+        MENUITEM SEPARATOR
         MENUITEM "E&xit",                  IDM_EXIT
     END
     POPUP "&View"
@@ -29,6 +32,7 @@ BEGIN
         MENUITEM "&RSI (14)",              IDM_RSI
         MENUITEM SEPARATOR
         MENUITEM "Trend &inset",           IDM_INSET
+        MENUITEM "&News pane",             IDM_NEWS
         MENUITEM SEPARATOR
         POPUP "&Theme"
         BEGIN
@@ -49,6 +53,13 @@ BEGIN
         MENUITEM "&Holding...",            IDM_HOLDING
         MENUITEM "A&lerts...",             IDM_ALERTS
     END
+    POPUP "&List"
+    BEGIN
+        MENUITEM "&New list...",           IDM_LIST_NEW
+        MENUITEM "&Rename list...",        IDM_LIST_RENAME
+        MENUITEM "&Delete list",           IDM_LIST_DELETE
+        MENUITEM SEPARATOR
+    END
     POPUP "&Help"
     BEGIN
         MENUITEM "&About StockTool",       IDM_ABOUT
@@ -65,13 +76,27 @@ BEGIN
     EDITTEXT        IDC_QUERY, 7, 18, 236, 13, ES_AUTOHSCROLL
     PUSHBUTTON      "Search", IDC_SEARCH, 247, 17, 46, 15
     LISTBOX         IDC_RESULTS, 7, 36, 286, 62, LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | LBS_USETABSTOPS | WS_VSCROLL | WS_TABSTOP
-    LTEXT           "Symbol (Yahoo notation: TD.TO, SHOP.TO, AAPL, BRK-B):", -1, 7, 106, 286, 8
-    EDITTEXT        IDC_SYMBOL, 7, 117, 286, 13, ES_AUTOHSCROLL | ES_UPPERCASE
+    LTEXT           "Symbol (Yahoo notation: TD.TO, SHOP.TO, AAPL, BRK-B):", -1, 7, 106, 200, 8
+    EDITTEXT        IDC_SYMBOL, 7, 117, 200, 13, ES_AUTOHSCROLL | ES_UPPERCASE
+    LTEXT           "Currency (optional):", -1, 215, 106, 78, 8
+    EDITTEXT        IDC_CURRENCY, 215, 117, 78, 13, ES_AUTOHSCROLL | ES_UPPERCASE
     LTEXT           "Display name (optional):", -1, 7, 136, 286, 8
     EDITTEXT        IDC_NAME, 7, 147, 286, 13, ES_AUTOHSCROLL
     LTEXT           "", IDC_HINT, 7, 166, 286, 8
     DEFPUSHBUTTON   "Add", IDOK, 189, 177, 50, 14
     PUSHBUTTON      "Close", IDCANCEL, 243, 177, 50, 14
+END
+
+IDD_LISTNAME DIALOGEX 0, 0, 220, 78
+STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Watch list"
+FONT 9, "Segoe UI", 400, 0, 1
+BEGIN
+    LTEXT           "", IDC_LTITLE, 7, 7, 206, 8
+    EDITTEXT        IDC_LISTNAME, 7, 20, 206, 13, ES_AUTOHSCROLL
+    LTEXT           "Letters, digits, spaces, - and _ (max 24).", IDC_LHINT, 7, 40, 206, 8
+    DEFPUSHBUTTON   "OK", IDOK, 109, 59, 50, 14
+    PUSHBUTTON      "Cancel", IDCANCEL, 163, 59, 50, 14
 END
 
 IDD_HOLDING DIALOGEX 0, 0, 220, 96

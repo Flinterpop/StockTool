@@ -17,4 +17,8 @@ bool ParseQuoteBatchJson(const char* data, size_t len,
 bool ParseSearchJson(const char* data, size_t len,
                      std::array<SearchHit, kMaxSearchHits>& out, size_t& count, std::wstring& err);
 
+// Same endpoint's "news" array: newest first as delivered.
+bool ParseNewsJson(const char* data, size_t len,
+                   std::array<NewsItem, kMaxNews>& out, size_t& count, std::wstring& err);
+
 } // namespace st

@@ -12,6 +12,13 @@
 #define IDC_QUERY         204
 #define IDC_SEARCH        205
 #define IDC_RESULTS       206
+#define IDC_CURRENCY      207
+
+// "List name" dialog (new / rename watch list)
+#define IDD_LISTNAME      230
+#define IDC_LISTNAME      231
+#define IDC_LTITLE        232
+#define IDC_LHINT         233
 
 // "Holding" dialog
 #define IDD_HOLDING       210
@@ -52,3 +59,11 @@
 #define IDM_ABOUT         1040
 #define IDM_TRAY_SHOW     1050
 #define IDM_TRAY_EXIT     1051
+#define IDM_EXPORT_LIST   1004
+#define IDM_EXPORT_CHART  1005
+#define IDM_NEWS          1017
+#define IDM_LIST_NEW      1060
+#define IDM_LIST_RENAME   1061
+#define IDM_LIST_DELETE   1062
+#define IDM_LIST_BASE     1080   // + list index: switch list (menu + tabs)
+#define IDM_RANGE_BASE    1100   // + range index: Ctrl+1..8

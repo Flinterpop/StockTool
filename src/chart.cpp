@@ -365,6 +365,47 @@ void DrawRsi(Graphics& g, const Layout& L, const Series& srs, const Font& font, 
     DrawTrack(g, L.rsi, t, n, sc, pen);
 }
 
+// Index of the bar a dividend ex-date falls on (the last bar at or before
+// it), or kMaxPoints when it is outside the series.
+size_t BarForTime(const Series& s, int64_t t) {
+    const size_t n = min(s.count, kMaxPoints);
+    if (n == 0 || t < s.pts[0].time) { return kMaxPoints; }
+    const auto end = s.pts.begin() + static_cast<std::ptrdiff_t>(n);
+    const auto it  = std::upper_bound(s.pts.begin(), end, t,
+                                      [](int64_t v, const Candle& c) { return v < c.time; });
+    return static_cast<size_t>((it - 1) - s.pts.begin());
+}
+
+// Sum of the dividends that land on bar `idx` (0 when none).
+double DividendOnBar(const QuoteData& d, size_t idx) {
+    double total = 0.0;
+    for (size_t k = 0; k < d.dividendCount && k < kMaxDividends; ++k) {
+        if (BarForTime(d.series, d.dividends[k].time) == idx) { total += d.dividends[k].amount; }
+    }
+    return total;
+}
+
+// Small markers along the bottom of the price plot on ex-dividend bars.
+void DrawDividendMarkers(Graphics& g, const Layout& L, const QuoteData& d, const Font& font,
+                         const Theme& th, float s) {
+    const size_t n = min(d.series.count, kMaxPoints);
+    if (n == 0 || d.dividendCount == 0) { return; }
+    SolidBrush   fill(th.up);
+    SolidBrush   txt(th.tipText);
+    StringFormat fmt;
+    fmt.SetAlignment(StringAlignmentCenter);
+    fmt.SetLineAlignment(StringAlignmentCenter);
+    const float r = 7.0f * s;
+    const float y = L.price.Y + L.price.Height - r - 2.0f * s;
+    for (size_t k = 0; k < d.dividendCount && k < kMaxDividends; ++k) {
+        const size_t idx = BarForTime(d.series, d.dividends[k].time);
+        if (idx >= n) { continue; }
+        const float x = XFor(idx, L.price, n);
+        g.FillEllipse(&fill, x - r, y - r, 2 * r, 2 * r);
+        g.DrawString(L"D", 1, &font, RectF(x - r, y - r, 2 * r, 2 * r), &fmt, &txt);
+    }
+}
+
 void DrawLastPriceTag(Graphics& g, const Layout& L, const Series& srs, const PriceScale& sc,
                       const Font& font, const Theme& th, float s) {
     assert(srs.count > 0);
@@ -434,6 +475,8 @@ void DrawHover(Graphics& g, const Layout& L, const ChartInput& in, const PriceSc
     tip += L"\nO " + FormatPrice(c.open) + L"   H " + FormatPrice(c.high);
     tip += L"\nL " + FormatPrice(c.low)  + L"   C " + FormatPrice(c.close);
     tip += L"\nVol " + FormatVolume(c.volume);
+    const double div = DividendOnBar(*in.data, idx);
+    if (div > 0.0) { tip += L"\nDividend " + FormatPrice(div) + L" (ex-date)"; }
     if (in.opts.rsi && n > kRsiPeriod) {
         Track t;
         Rsi(srs, kRsiPeriod, t);
@@ -796,6 +839,7 @@ void DrawChartBase(Graphics& g, const RectF& rc, const ChartInput& in, float sca
 
     DrawVolume(g, L, srs, th);
     if (in.opts.rsi) { DrawRsi(g, L, srs, axisFont, th, scale); }
+    DrawDividendMarkers(g, L, *in.data, axisFont, th, scale);
     DrawLastPriceTag(g, L, srs, c.sc, axisFont, th, scale);
     DrawIndicatorLegend(g, L, in.opts, axisFont, th, scale);
     if (in.opts.inset) { DrawInset(g, L, in, axisFont, th, scale); }

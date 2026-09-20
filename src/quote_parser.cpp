@@ -110,6 +110,26 @@ bool ParseSeries(const json& r, Series& s, std::wstring& err) {
     return true;
 }
 
+// events.dividends is an object keyed by timestamp: {"1700000000":{"amount":1.38,"date":1700000000}}.
+void ParseDividends(const json& r, QuoteData& out) {
+    out.dividendCount = 0;
+    const json* events = Child(r, "events");
+    const json* divs   = (events != nullptr) ? Child(*events, "dividends") : nullptr;
+    if (divs == nullptr || !divs->is_object()) { return; }
+    for (auto it = divs->begin(); it != divs->end() && out.dividendCount < kMaxDividends; ++it) {
+        const json& d = it.value();
+        const double amount = NumOr(d, "amount", 0.0);
+        const double date   = NumOr(d, "date", 0.0);
+        if (amount <= 0.0 || date <= 0.0) { continue; }
+        out.dividends[out.dividendCount] = Dividend{ static_cast<int64_t>(date), amount };
+        ++out.dividendCount;
+    }
+    // Keys are strings, so object order is lexical; the app wants time order.
+    std::sort(out.dividends.begin(), out.dividends.begin() + static_cast<std::ptrdiff_t>(out.dividendCount),
+              [](const Dividend& a, const Dividend& b) { return a.time < b.time; });
+    assert(out.dividendCount <= kMaxDividends);
+}
+
 } // namespace
 
 bool ParseChartJson(const char* data, size_t len, QuoteData& out, std::wstring& err) {
@@ -143,8 +163,46 @@ bool ParseChartJson(const char* data, size_t len, QuoteData& out, std::wstring& 
     const json* meta = Child(r, "meta");
     if (meta != nullptr) { ParseMeta(*meta, out.meta); }
     if (!ParseSeries(r, out.series, err)) { return false; }
+    ParseDividends(r, out);
     out.valid = true;
     assert(err.empty() || !out.valid);
+    return true;
+}
+
+bool ParseNewsJson(const char* data, size_t len,
+                   std::array<NewsItem, kMaxNews>& out, size_t& count, std::wstring& err) {
+    assert(data != nullptr);
+    count = 0;
+    if (len == 0) {
+        err = L"Empty response";
+        return false;
+    }
+    const json doc = json::parse(data, data + len, nullptr, false);
+    if (doc.is_discarded()) {
+        err = L"Response is not valid JSON";
+        return false;
+    }
+    const json* news = Child(doc, "news");
+    if (news == nullptr || !news->is_array()) {
+        const json* fin  = Child(doc, "finance");
+        const json* ferr = (fin != nullptr) ? Child(*fin, "error") : nullptr;
+        err = (ferr != nullptr) ? L"Provider: " + StrOr(*ferr, "description", L"unknown error")
+                                : L"Response has no news block";
+        return false;
+    }
+    const size_t n = min(news->size(), kMaxNews);
+    for (size_t i = 0; i < n; ++i) {
+        const json& item = (*news)[i];
+        NewsItem& h = out[count];
+        h = NewsItem{};
+        h.title = StrOr(item, "title", L"");
+        if (h.title.empty()) { continue; }
+        h.publisher = StrOr(item, "publisher", L"");
+        h.link      = StrOr(item, "link", L"");
+        h.time      = static_cast<int64_t>(NumOr(item, "providerPublishTime", 0.0));
+        ++count;
+    }
+    assert(count <= kMaxNews);
     return true;
 }
 

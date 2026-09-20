@@ -4,12 +4,16 @@
 #include "resource.h"
 #include "textfmt.h"
 
+#include <commctrl.h>
+#include <commdlg.h>
 #include <dwmapi.h>
 #include <uxtheme.h>
 #include <windowsx.h>
 
 #include <cassert>
 #include <cmath>
+#include <ctime>
+#include <limits>
 
 namespace st {
 namespace {
@@ -25,6 +29,7 @@ constexpr wchar_t kWindowTitle[] = L"StockTool v" ST_WIDE(STOCKTOOL_VERSION);
 
 // Child-control IDs (menu commands are IDM_* from resource.h, 1000+).
 constexpr int IDC_LIST       = 100;
+constexpr int IDC_TABS       = 101;
 constexpr int IDC_RANGE_BASE = 200;   // + range index
 constexpr int IDC_STYLE      = 300;
 constexpr int IDC_REFRESH    = 301;
@@ -41,19 +46,23 @@ constexpr UINT     kTrayId       = 1;
 constexpr int kMargin      = 10;
 constexpr int kListW       = 250;
 constexpr int kListItemH   = 44;
-constexpr int kPortfolioH  = 46;
+constexpr int kTabsH       = 26;
+constexpr int kPortfolioH  = 62;
 constexpr int kHeaderH     = 76;
 constexpr int kButtonH     = 26;
 constexpr int kRangeBtnW   = 46;
 constexpr int kWideBtnW    = 84;
 constexpr int kBtnGap      = 4;
+constexpr int kNewsH       = 150;
+constexpr int kNewsRowH    = 20;
 constexpr int kStatsH      = 112;
 constexpr int kStatusH     = 20;
 constexpr int kListBtnGap  = 6;
 constexpr int kMinWinW     = 960;
 constexpr int kMinWinH     = 620;
 
-constexpr DWORD kDwmUseImmersiveDarkMode = 20;
+constexpr DWORD  kDwmUseImmersiveDarkMode = 20;
+constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
 
 RectF ToRectF(const RECT& r) {
     return RectF(static_cast<REAL>(r.left), static_cast<REAL>(r.top),
@@ -73,6 +82,10 @@ std::wstring TimeNow() {
     return b.data();
 }
 
+int64_t UnixNow() {
+    return static_cast<int64_t>(_time64(nullptr));
+}
+
 bool SameSymbol(const std::wstring& a, const std::wstring& b) {
     return _wcsicmp(a.c_str(), b.c_str()) == 0;
 }
@@ -84,7 +97,8 @@ bool SameBars(const QuoteData& a, const QuoteData& b) {
     if (!a.valid) { return true; }
     const Series& x = a.series;
     const Series& y = b.series;
-    if (x.count != y.count || a.meta.price != b.meta.price || a.meta.marketTime != b.meta.marketTime) { return false; }
+    if (x.count != y.count || a.meta.price != b.meta.price || a.meta.marketTime != b.meta.marketTime ||
+        a.dividendCount != b.dividendCount) { return false; }
     if (x.count == 0) { return true; }
     const Candle& xl = x.pts[x.count - 1];
     const Candle& yl = y.pts[y.count - 1];
@@ -94,6 +108,35 @@ bool SameBars(const QuoteData& a, const QuoteData& b) {
 
 Font MakeFont(float pt, float scale, INT style = FontStyleRegular) {
     return Font(L"Segoe UI", FontPx(pt, scale), style, UnitPixel);
+}
+
+// CSV helpers: RFC 4180 quoting, UTF-8 output.
+std::string Utf8(const std::wstring& s) {
+    if (s.empty()) { return {}; }
+    const int n = WideCharToMultiByte(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), nullptr, 0, nullptr, nullptr);
+    if (n <= 0) { return {}; }
+    std::string out(static_cast<size_t>(n), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), out.data(), n, nullptr, nullptr);
+    return out;
+}
+
+std::string CsvField(const std::wstring& s) {
+    std::wstring q;
+    q.reserve(s.size() + 2);
+    bool needQuotes = false;
+    for (wchar_t c : s) {
+        if (c == L'"') { q += L'"'; needQuotes = true; }
+        if (c == L',' || c == L'\n' || c == L'\r') { needQuotes = true; }
+        q += c;
+    }
+    return Utf8(needQuotes ? L"\"" + q + L"\"" : q);
+}
+
+std::string CsvNum(double v, int decimals) {
+    if (!std::isfinite(v)) { return {}; }
+    std::array<char, 64> b{};
+    sprintf_s(b.data(), b.size(), "%.*f", decimals, v);
+    return b.data();
 }
 
 } // namespace
@@ -106,7 +149,7 @@ App::~App() {
         SelectObject(chartDC_, chartOld_);
         DeleteDC(chartDC_);
     }
-    if (chartBmp_ != nullptr) { DeleteObject(chartBmp_); }
+    if (chartBmp_ != nullptr)   { DeleteObject(chartBmp_); }
     if (hUiFont_ != nullptr)    { DeleteObject(hUiFont_); }
     if (hBgBrush_ != nullptr)   { DeleteObject(hBgBrush_); }
     if (hListBrush_ != nullptr) { DeleteObject(hListBrush_); }
@@ -129,8 +172,9 @@ bool App::Create(HINSTANCE hInst, int nCmdShow, std::wstring& err) {
     if (GetFileAttributesW(cfgPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
         if (!WriteDefaultConfig(cfgPath, err)) { return false; }
     }
-    if (!LoadConfig(cfgPath, cfg_, err)) { return false; }
     LoadViewState(cfgPath, state_);
+    if (!LoadConfig(cfgPath, state_.list, cfg_, err)) { return false; }
+    state_.list = cfg_.listName;
     range_ = (state_.range < kRanges.size()) ? state_.range : cfg_.defaultRange;
     for (size_t i = 0; i < cfg_.stockCount; ++i) {
         if (SameSymbol(cfg_.stocks[i].symbol, state_.selected)) { selected_ = i; }
@@ -140,6 +184,7 @@ bool App::Create(HINSTANCE hInst, int nCmdShow, std::wstring& err) {
     insets_    = std::make_unique<std::array<QuoteData, kMaxStocks>>();
     incoming_  = std::make_unique<QuoteData>();
     quotes_    = std::make_unique<std::array<QuoteStats, kMaxStocks>>();
+    news_      = std::make_unique<std::array<NewsCache, kMaxStocks>>();
     theme_     = &ThemeFor(cfg_.theme == ThemeMode::Dark ||
                            (cfg_.theme == ThemeMode::System && SystemPrefersDark()));
 
@@ -177,14 +222,19 @@ bool App::Create(HINSTANCE hInst, int nCmdShow, std::wstring& err) {
         return false;
     }
 
-    const ACCEL accel[] = {
-        { FVIRTKEY, VK_F5, static_cast<WORD>(IDM_REFRESH) },
-        { FVIRTKEY | FCONTROL, 'N', static_cast<WORD>(IDM_ADD) },
-        { FVIRTKEY, VK_F2, static_cast<WORD>(IDM_EDIT) },
-        { FVIRTKEY | FCONTROL, VK_UP, static_cast<WORD>(IDM_MOVEUP) },
-        { FVIRTKEY | FCONTROL, VK_DOWN, static_cast<WORD>(IDM_MOVEDOWN) },
-    };
-    hAccel_ = CreateAcceleratorTableW(const_cast<ACCEL*>(accel), 5);
+    std::array<ACCEL, 6 + kRanges.size()> accel{};
+    size_t n = 0;
+    accel[n++] = { FVIRTKEY, VK_F5, static_cast<WORD>(IDM_REFRESH) };
+    accel[n++] = { FVIRTKEY | FCONTROL, 'N', static_cast<WORD>(IDM_ADD) };
+    accel[n++] = { FVIRTKEY | FCONTROL, 'F', static_cast<WORD>(IDM_ADD) };
+    accel[n++] = { FVIRTKEY, VK_F2, static_cast<WORD>(IDM_EDIT) };
+    accel[n++] = { FVIRTKEY | FCONTROL, VK_UP, static_cast<WORD>(IDM_MOVEUP) };
+    accel[n++] = { FVIRTKEY | FCONTROL, VK_DOWN, static_cast<WORD>(IDM_MOVEDOWN) };
+    for (size_t i = 0; i < kRanges.size(); ++i) {
+        accel[n++] = { FVIRTKEY | FCONTROL, static_cast<WORD>('1' + i), static_cast<WORD>(IDM_RANGE_BASE + i) };
+    }
+    assert(n == accel.size());
+    hAccel_ = CreateAcceleratorTableW(accel.data(), static_cast<int>(n));
     assert(hAccel_ != nullptr);
 
     ApplyStartupState(nCmdShow);
@@ -255,6 +305,7 @@ LRESULT App::Handle(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_PAINT:        OnPaint();   return 0;
     case WM_ERASEBKGND:   return 1;
     case WM_COMMAND:      OnCommand(LOWORD(wp), HIWORD(wp)); return 0;
+    case WM_NOTIFY:       return OnNotify(reinterpret_cast<const NMHDR*>(lp));
     case WM_CONTEXTMENU:  OnContextMenu(reinterpret_cast<HWND>(wp), GET_X_LPARAM(lp), GET_Y_LPARAM(lp)); return 0;
     case WM_TIMER:        if (wp == kRefreshTimer) { OnTimer(); } return 0;
     case WM_MOUSEMOVE:    OnMouseMove(GET_X_LPARAM(lp), GET_Y_LPARAM(lp), (wp & MK_LBUTTON) != 0); return 0;
@@ -287,6 +338,8 @@ LRESULT App::Handle(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_APP_CHART_READY:   OnChartReady(static_cast<size_t>(wp), static_cast<size_t>(lp)); return 0;
     case WM_APP_INSET_READY:   OnInsetReady(static_cast<size_t>(wp), static_cast<size_t>(lp)); return 0;
     case WM_APP_QUOTE_READY:   OnQuoteReady(); return 0;
+    case WM_APP_FX_READY:      OnFxReady(); return 0;
+    case WM_APP_NEWS_READY:    OnNewsReady(static_cast<size_t>(wp)); return 0;
     default: break;
     }
     return DefWindowProcW(hwnd_, msg, wp, lp);
@@ -301,6 +354,7 @@ void App::OnCreate() {
     CreateControls();
     ApplyTheme();
     SyncViewMenu();
+    RebuildListMenu();
     Layout();
 
     tray_.cbSize           = sizeof(tray_);
@@ -325,8 +379,11 @@ void App::OnCreate() {
     }
     RequestAllSummaries();
     RequestQuotes();
-    RequestChart(true);
-    RequestInset(true);
+    if (HasStocks()) {
+        RequestChart(true);
+        RequestInset(true);
+        RequestNews(true);
+    }
     SetTimer(hwnd_, kRefreshTimer, cfg_.refreshSeconds * 1000u, nullptr);
     SetStatus(L"Loading " + std::to_wstring(cfg_.stockCount) + L" symbols from " + cfg_.path);
 }
@@ -351,6 +408,7 @@ void App::SaveState() {
     }
     state_.range    = range_;
     state_.selected = (selected_ < cfg_.stockCount) ? cfg_.stocks[selected_].symbol : L"";
+    state_.list     = cfg_.listName;
     std::wstring err;
     const bool ok = SaveViewState(cfg_.path, state_, err);
     (void)ok;  // nothing useful to do at shutdown if the file is read-only
@@ -362,7 +420,7 @@ void App::CreateFonts() {
                            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                            DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
     assert(hUiFont_ != nullptr);
-    const HWND controls[] = { hList_, hStyleBtn_, hCompareBtn_, hRefreshBtn_, hAddBtn_, hRemoveBtn_, hReloadBtn_ };
+    const HWND controls[] = { hList_, hTabs_, hStyleBtn_, hCompareBtn_, hRefreshBtn_, hAddBtn_, hRemoveBtn_, hReloadBtn_ };
     for (HWND h : controls) {
         if (h != nullptr) { SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(hUiFont_), TRUE); }
     }
@@ -373,7 +431,6 @@ void App::CreateFonts() {
 }
 
 void App::CreateControls() {
-    assert(cfg_.stockCount > 0);
     auto button = [this](const wchar_t* text, DWORD style, int id) {
         HWND h = CreateWindowExW(0, L"BUTTON", text, WS_CHILD | WS_VISIBLE | WS_TABSTOP | style,
                                  0, 0, 10, 10, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
@@ -382,6 +439,10 @@ void App::CreateControls() {
         return h;
     };
 
+    hTabs_ = CreateWindowExW(0, WC_TABCONTROLW, nullptr, WS_CHILD | WS_TABSTOP | TCS_FOCUSNEVER,
+                             0, 0, 10, 10, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_TABS)),
+                             hInst_, nullptr);
+    assert(hTabs_ != nullptr);
     hList_ = CreateWindowExW(0, L"LISTBOX", nullptr,
                              WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_BORDER | LBS_NOTIFY |
                                  LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | LBS_NOINTEGRALHEIGHT,
@@ -389,6 +450,7 @@ void App::CreateControls() {
                              hInst_, nullptr);
     assert(hList_ != nullptr);
     RebuildList();
+    RebuildTabs();
 
     for (size_t i = 0; i < kRanges.size(); ++i) {
         hRangeBtns_[i] = button(kRanges[i].label, BS_AUTORADIOBUTTON | BS_PUSHLIKE | (i == 0 ? WS_GROUP : 0),
@@ -410,7 +472,49 @@ void App::RebuildList() {
         SendMessageW(hList_, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(cfg_.stocks[i].symbol.c_str()));
     }
     if (selected_ >= cfg_.stockCount) { selected_ = 0; }
-    SendMessageW(hList_, LB_SETCURSEL, static_cast<WPARAM>(selected_), 0);
+    if (HasStocks()) { SendMessageW(hList_, LB_SETCURSEL, static_cast<WPARAM>(selected_), 0); }
+}
+
+// One tab per watch list; hidden while there is only the default list.
+void App::RebuildTabs() {
+    if (hTabs_ == nullptr) { return; }
+    TabCtrl_DeleteAllItems(hTabs_);
+    int active = 0;
+    for (size_t i = 0; i < cfg_.listCount; ++i) {
+        std::wstring label = cfg_.lists[i].empty() ? L"Watch list" : cfg_.lists[i];
+        TCITEMW item{};
+        item.mask    = TCIF_TEXT;
+        item.pszText = label.data();
+        TabCtrl_InsertItem(hTabs_, static_cast<int>(i), &item);
+        if (SameSymbol(cfg_.lists[i], cfg_.listName)) { active = static_cast<int>(i); }
+    }
+    TabCtrl_SetCurSel(hTabs_, active);
+    ShowWindow(hTabs_, cfg_.listCount > 1 ? SW_SHOW : SW_HIDE);
+}
+
+// The List menu ends with one radio item per watch list.
+void App::RebuildListMenu() {
+    HMENU menu = GetSubMenu(hMenu_, 3);
+    assert(menu != nullptr);
+    if (menu == nullptr) { return; }
+    // Remove any previous list items (everything after the separator).
+    for (int guard = 0; guard < static_cast<int>(kMaxLists) + 1; ++guard) {
+        const int count = GetMenuItemCount(menu);
+        if (count <= 4) { break; }
+        DeleteMenu(menu, static_cast<UINT>(count - 1), MF_BYPOSITION);
+    }
+    UINT activeId = IDM_LIST_BASE;
+    for (size_t i = 0; i < cfg_.listCount; ++i) {
+        const std::wstring label = cfg_.lists[i].empty() ? L"Watch list" : cfg_.lists[i];
+        const UINT id = IDM_LIST_BASE + static_cast<UINT>(i);
+        AppendMenuW(menu, MF_STRING, id, label.c_str());
+        if (SameSymbol(cfg_.lists[i], cfg_.listName)) { activeId = id; }
+    }
+    CheckMenuRadioItem(menu, IDM_LIST_BASE, IDM_LIST_BASE + static_cast<UINT>(kMaxLists), activeId, MF_BYCOMMAND);
+    const bool named = !cfg_.listName.empty();
+    EnableMenuItem(menu, IDM_LIST_RENAME, MF_BYCOMMAND | (named ? MF_ENABLED : MF_GRAYED));
+    EnableMenuItem(menu, IDM_LIST_DELETE, MF_BYCOMMAND | (named ? MF_ENABLED : MF_GRAYED));
+    DrawMenuBar(hwnd_);
 }
 
 void App::Layout() {
@@ -420,13 +524,20 @@ void App::Layout() {
     const int h = rc.bottom;
     const int m = Px(kMargin);
 
+    int top = m;
+    const bool tabs = cfg_.listCount > 1;
+    tabsRect_ = { m, top, m + Px(kListW), top + (tabs ? Px(kTabsH) : 0) };
+    if (tabs) {
+        MoveWindow(hTabs_, tabsRect_.left, tabsRect_.top, tabsRect_.right - tabsRect_.left,
+                   tabsRect_.bottom - tabsRect_.top, TRUE);
+        top = tabsRect_.bottom + Px(kListBtnGap);
+    }
     const bool portfolio = ComputePortfolio().any;
-    int listTop = m;
-    portfolioRect_ = { m, m, m + Px(kListW), m + (portfolio ? Px(kPortfolioH) : 0) };
-    if (portfolio) { listTop = portfolioRect_.bottom + Px(kListBtnGap); }
+    portfolioRect_ = { m, top, m + Px(kListW), top + (portfolio ? Px(kPortfolioH) : 0) };
+    if (portfolio) { top = portfolioRect_.bottom + Px(kListBtnGap); }
 
     const int listBtnH = Px(kButtonH);
-    listRect_ = { m, listTop, m + Px(kListW), h - m - listBtnH - Px(kListBtnGap) };
+    listRect_ = { m, top, m + Px(kListW), h - m - listBtnH - Px(kListBtnGap) };
     MoveWindow(hList_, listRect_.left, listRect_.top,
                listRect_.right - listRect_.left, listRect_.bottom - listRect_.top, TRUE);
     const int listBtnY = h - m - listBtnH;
@@ -452,7 +563,9 @@ void App::Layout() {
 
     statusRect_ = { rightX, h - m - Px(kStatusH), rightR, h - m };
     statsRect_  = { rightX, statusRect_.top - Px(kStatsH), rightR, statusRect_.top };
-    chartRect_  = { rightX, btnY + btnH + m, rightR, statsRect_.top - m };
+    const int newsH = (state_.news && fetcher_.NewsEnabled()) ? Px(kNewsH) : 0;
+    newsRect_   = { rightX, statsRect_.top - newsH, rightR, statsRect_.top };
+    chartRect_  = { rightX, btnY + btnH + m, rightR, newsRect_.top - m };
     assert(chartRect_.bottom >= chartRect_.top);
 }
 
@@ -473,7 +586,7 @@ void App::ApplyTheme() {
     (void)hr;  // pre-20H1 builds ignore the attribute; the client area is still themed
 
     const wchar_t* sub = dark ? L"DarkMode_Explorer" : L"Explorer";
-    const HWND controls[] = { hList_, hStyleBtn_, hCompareBtn_, hRefreshBtn_, hAddBtn_, hRemoveBtn_, hReloadBtn_ };
+    const HWND controls[] = { hList_, hTabs_, hStyleBtn_, hCompareBtn_, hRefreshBtn_, hAddBtn_, hRemoveBtn_, hReloadBtn_ };
     for (HWND h : controls) {
         if (h != nullptr) { SetWindowTheme(h, sub, nullptr); }
     }
@@ -505,7 +618,9 @@ void App::SyncViewMenu() {
     check(IDM_BOLLINGER, state_.bollinger);
     check(IDM_RSI,       state_.rsi);
     check(IDM_INSET,     state_.inset);
+    check(IDM_NEWS,      state_.news);
     check(IDM_MINTRAY,   cfg_.minimizeToTray);
+    EnableMenuItem(hMenu_, IDM_NEWS, MF_BYCOMMAND | (fetcher_.NewsEnabled() || hwnd_ == nullptr ? MF_ENABLED : MF_GRAYED));
     const int themeId = (cfg_.theme == ThemeMode::Light) ? IDM_THEME_LIGHT
                       : (cfg_.theme == ThemeMode::Dark)  ? IDM_THEME_DARK : IDM_THEME_SYSTEM;
     CheckMenuRadioItem(hMenu_, IDM_THEME_SYSTEM, IDM_THEME_DARK, static_cast<UINT>(themeId), MF_BYCOMMAND);
@@ -535,6 +650,7 @@ void App::RequestQuotes() {
 }
 
 void App::RequestChart(bool clearCurrent) {
+    if (!HasStocks()) { return; }
     assert(selected_ < cfg_.stockCount);
     assert(range_ < kRanges.size());
     if (clearCurrent) {
@@ -550,12 +666,21 @@ void App::RequestChart(bool clearCurrent) {
 }
 
 void App::RequestInset(bool clearCurrent) {
-    if (!state_.inset) { return; }
+    if (!state_.inset || !HasStocks()) { return; }
     if (clearCurrent) {
         insetValid_[selected_] = false;
         RedrawChart();
     }
     if (!fetcher_.Enqueue(JobKind::Inset, selected_, cfg_.insetRange)) { SetStatus(L"Fetch queue is full"); }
+}
+
+void App::RequestNews(bool clearCurrent) {
+    if (!state_.news || !fetcher_.NewsEnabled() || !HasStocks()) { return; }
+    if (clearCurrent) {
+        (*news_)[selected_] = NewsCache{};
+        InvalidateRect(hwnd_, &newsRect_, FALSE);
+    }
+    fetcher_.Enqueue(JobKind::News, selected_, 0);
 }
 
 // Warms the caches for every other ticker so switching is instant. Runs
@@ -568,6 +693,17 @@ void App::PrefetchOthers() {
     }
 }
 
+// Queues FX pairs for every holding whose currency differs from the
+// portfolio currency and has no rate yet.
+void App::EnsureFxRates() {
+    for (size_t i = 0; i < cfg_.stockCount; ++i) {
+        if (cfg_.stocks[i].holding.qty <= 0.0) { continue; }
+        const std::wstring cur = CurrencyOf(i);
+        if (cur.empty() || SameSymbol(cur, cfg_.portfolioCurrency)) { continue; }
+        if (std::isnan(RateToPortfolio(cur))) { fetcher_.EnqueueFx(cur, cfg_.portfolioCurrency); }
+    }
+}
+
 void App::SelectStock(size_t index) {
     if (index >= cfg_.stockCount) { return; }
     selected_ = index;
@@ -577,12 +713,14 @@ void App::SelectStock(size_t index) {
     // Cached data shows immediately; a silent refresh is queued behind it.
     RequestChart(!chartValid_[index]);
     RequestInset(!insetValid_[index]);
+    RequestNews(!(*news_)[index].valid);
     RedrawAll();
 }
 
 void App::SelectRange(size_t index) {
     if (index >= kRanges.size()) { return; }
     range_ = index;
+    SendMessageW(hRangeBtns_[index], BM_SETCHECK, BST_CHECKED, 0);
     for (size_t i = 0; i < kMaxStocks; ++i) { chartValid_[i] = false; }
     RequestChart(true);
 }
@@ -637,9 +775,37 @@ App::PriceChange App::ComputeChange(const QuoteData& q) const {
     return pc;
 }
 
+std::wstring App::CurrencyOf(size_t index) const {
+    assert(index < cfg_.stockCount);
+    const StockEntry& e = cfg_.stocks[index];
+    if (!e.currency.empty()) { return e.currency; }
+    return (*summaries_)[index].meta.currency;
+}
+
+double App::RateToPortfolio(const std::wstring& cur) const {
+    if (cur.empty() || SameSymbol(cur, cfg_.portfolioCurrency)) { return 1.0; }
+    for (const FxRate& r : fx_) {
+        if (r.valid && SameSymbol(r.from, cur) && SameSymbol(r.to, cfg_.portfolioCurrency)) { return r.rate; }
+    }
+    return kNaN;
+}
+
+// Dividends per share over the last 365 days, from the (5Y/1Y) inset data.
+double App::TrailingDividends(size_t index) const {
+    assert(index < cfg_.stockCount);
+    if (!insetValid_[index]) { return kNaN; }
+    const QuoteData& q = (*insets_)[index];
+    if (!q.valid) { return kNaN; }
+    const int64_t since = UnixNow() - 365 * 86400;
+    double total = 0.0;
+    for (size_t k = 0; k < q.dividendCount && k < kMaxDividends; ++k) {
+        if (q.dividends[k].time >= since) { total += q.dividends[k].amount; }
+    }
+    return total;
+}
+
 App::Portfolio App::ComputePortfolio() const {
     Portfolio p;
-    bool mixed = false;
     for (size_t i = 0; i < cfg_.stockCount; ++i) {
         const Holding& h = cfg_.stocks[i].holding;
         if (h.qty <= 0.0) { continue; }
@@ -647,13 +813,17 @@ App::Portfolio App::ComputePortfolio() const {
         const QuoteData& q = (*summaries_)[i];
         const PriceChange pc = ComputeChange(q);
         if (!pc.valid) { continue; }
-        p.value += h.qty * pc.last;
-        p.cost  += h.qty * h.cost;
-        p.day   += h.qty * pc.change;
-        if (p.currency.empty() && !mixed) { p.currency = q.meta.currency; }
-        else if (!SameSymbol(p.currency, q.meta.currency)) { mixed = true; }
+        const double rate = RateToPortfolio(CurrencyOf(i));
+        if (std::isnan(rate)) {
+            p.partial = true;
+            continue;
+        }
+        p.value += h.qty * pc.last * rate;
+        p.cost  += h.qty * h.cost * rate;
+        p.day   += h.qty * pc.change * rate;
+        const double div = TrailingDividends(i);
+        if (!std::isnan(div)) { p.income += h.qty * div * rate; }
     }
-    if (mixed) { p.currency.clear(); }
     return p;
 }
 
@@ -761,13 +931,14 @@ bool App::AddTicker(const StockEntry& entry, std::wstring& err) {
         err = L"Limit of " + std::to_wstring(kMaxStocks) + L" tickers reached";
         return false;
     }
-    if (!WriteStockEntry(cfg_.path, entry, err)) { return false; }
+    if (!WriteStockEntry(cfg_, entry, err)) { return false; }
     const size_t index = cfg_.stockCount;
     cfg_.stocks[index] = entry;
     ++cfg_.stockCount;
     (*summaries_)[index] = QuoteData{};
     chartValid_[index]   = false;
     insetValid_[index]   = false;
+    (*news_)[index]      = NewsCache{};
     alerts_[index]       = AlertState{};
     SendMessageW(hList_, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(entry.symbol.c_str()));
 
@@ -781,7 +952,7 @@ bool App::AddTicker(const StockEntry& entry, std::wstring& err) {
 }
 
 void App::OnEditTicker() {
-    assert(selected_ < cfg_.stockCount);
+    if (!HasStocks()) { return; }
     const size_t index = selected_;
     StockEntry edited = cfg_.stocks[index];
     if (!RunEditTickerDialog(hInst_, hwnd_, cfg_, fetcher_, index, edited)) { return; }
@@ -796,22 +967,26 @@ bool App::ApplyTickerEdit(size_t index, const StockEntry& edited, std::wstring& 
     assert(!edited.symbol.empty());
     const StockEntry old = cfg_.stocks[index];
     const bool symbolChanged = !SameSymbol(old.symbol, edited.symbol);
-    const bool nameChanged   = old.name != edited.name;
-    if (!symbolChanged && !nameChanged) { return true; }
+    const bool changed = symbolChanged || old.name != edited.name || old.currency != edited.currency;
+    if (!changed) { return true; }
 
     StockEntry& e = cfg_.stocks[index];
-    e.symbol = edited.symbol;
-    e.name   = edited.name;
+    e.symbol   = edited.symbol;
+    e.name     = edited.name;
+    e.currency = edited.currency;
     bool ok = true;
     if (symbolChanged) {
-        // Old keys go (stocks/holdings/alerts), then the section is rewritten
-        // in order with the new symbol, then holding/alert are re-keyed.
-        ok = DeleteStockEntry(cfg_.path, old.symbol, err) &&
-             WriteStockOrder(cfg_.path, cfg_, err) &&
+        // Old keys go, then the section is rewritten in order with the new
+        // symbol, then holding/alert/currency are re-keyed.
+        ok = DeleteStockEntry(cfg_, old.symbol, err) &&
+             WriteStockOrder(cfg_, err) &&
              WriteHolding(cfg_.path, e.symbol, e.holding, err) &&
-             WriteAlert(cfg_.path, e.symbol, e.alert, err);
+             WriteAlert(cfg_.path, e.symbol, e.alert, err) &&
+             WriteCurrency(cfg_.path, e.symbol, e.currency, err);
     } else {
-        ok = WriteStockEntry(cfg_.path, e, err);
+        // Name/currency only: WriteStockEntry never clears a currency
+        // override, so write it explicitly (an empty code deletes the key).
+        ok = WriteStockEntry(cfg_, e, err) && WriteCurrency(cfg_.path, e.symbol, e.currency, err);
     }
     if (!ok) {
         cfg_.stocks[index] = old;   // keep memory and file consistent
@@ -822,29 +997,32 @@ bool App::ApplyTickerEdit(size_t index, const StockEntry& edited, std::wstring& 
         (*summaries_)[index] = QuoteData{};
         chartValid_[index]   = false;
         insetValid_[index]   = false;
+        (*news_)[index]      = NewsCache{};
         alerts_[index]       = AlertState{};
     }
     RebuildList();
     fetcher_.UpdateConfig(cfg_);
     RequestAllSummaries();
     RequestQuotes();
+    EnsureFxRates();
     SelectStock(index);
     Layout();
     RedrawAll();
-    SetStatus(symbolChanged ? old.symbol + L" is now " + e.symbol : L"Renamed " + e.symbol);
+    SetStatus(symbolChanged ? old.symbol + L" is now " + e.symbol : L"Updated " + e.symbol);
     return true;
 }
 
 void App::OnRemoveTicker() {
+    if (!HasStocks()) { return; }
     assert(selected_ < cfg_.stockCount);
-    if (cfg_.stockCount <= 1) {
-        SetStatus(L"Keep at least one ticker");
+    if (cfg_.stockCount <= 1 && cfg_.listName.empty()) {
+        SetStatus(L"Keep at least one ticker in the default list");
         return;
     }
     const size_t       index  = selected_;
     const std::wstring symbol = cfg_.stocks[index].symbol;
     std::wstring err;
-    if (!DeleteStockEntry(cfg_.path, symbol, err)) {
+    if (!DeleteStockEntry(cfg_, symbol, err)) {
         SetStatus(err);
         return;
     }
@@ -856,6 +1034,7 @@ void App::OnRemoveTicker() {
         chartValid_[i]     = chartValid_[i + 1];
         (*insets_)[i]      = (*insets_)[i + 1];
         insetValid_[i]     = insetValid_[i + 1];
+        (*news_)[i]        = (*news_)[i + 1];
         alerts_[i]         = alerts_[i + 1];
     }
     --cfg_.stockCount;
@@ -863,25 +1042,28 @@ void App::OnRemoveTicker() {
     (*summaries_)[cfg_.stockCount] = QuoteData{};
     chartValid_[cfg_.stockCount]   = false;
     insetValid_[cfg_.stockCount]   = false;
+    (*news_)[cfg_.stockCount]      = NewsCache{};
     SendMessageW(hList_, LB_DELETESTRING, static_cast<WPARAM>(index), 0);
 
     fetcher_.UpdateConfig(cfg_);
     RequestAllSummaries();
     RequestQuotes();
-    SelectStock((index < cfg_.stockCount) ? index : cfg_.stockCount - 1);
+    if (HasStocks()) { SelectStock((index < cfg_.stockCount) ? index : cfg_.stockCount - 1); }
+    else             { selected_ = 0; }
     Layout();
+    RedrawAll();
     SetStatus(L"Removed " + symbol);
-    assert(cfg_.stockCount >= 1);
 }
 
 void App::OnMoveTicker(int delta) {
     assert(delta == 1 || delta == -1);
+    if (!HasStocks()) { return; }
     const size_t i = selected_;
     if ((delta < 0 && i == 0) || (delta > 0 && i + 1 >= cfg_.stockCount)) { return; }
     const size_t j = (delta < 0) ? i - 1 : i + 1;
     std::swap(cfg_.stocks[i], cfg_.stocks[j]);
     std::wstring err;
-    if (!WriteStockOrder(cfg_.path, cfg_, err)) {
+    if (!WriteStockOrder(cfg_, err)) {
         std::swap(cfg_.stocks[i], cfg_.stocks[j]);
         SetStatus(err);
         return;
@@ -891,6 +1073,7 @@ void App::OnMoveTicker(int delta) {
     std::swap(chartValid_[i], chartValid_[j]);
     std::swap((*insets_)[i], (*insets_)[j]);
     std::swap(insetValid_[i], insetValid_[j]);
+    std::swap((*news_)[i], (*news_)[j]);
     std::swap(alerts_[i], alerts_[j]);
     selected_ = j;
     RebuildList();
@@ -900,7 +1083,7 @@ void App::OnMoveTicker(int delta) {
 }
 
 void App::OnEditHolding() {
-    assert(selected_ < cfg_.stockCount);
+    if (!HasStocks()) { return; }
     StockEntry& e = cfg_.stocks[selected_];
     Holding h = e.holding;
     if (!RunHoldingDialog(hInst_, hwnd_, e.symbol, h)) { return; }
@@ -911,13 +1094,14 @@ void App::OnEditHolding() {
     }
     e.holding = h;
     fetcher_.UpdateConfig(cfg_);
+    EnsureFxRates();
     Layout();
     RedrawAll();
     SetStatus((h.qty > 0.0) ? L"Holding saved for " + e.symbol : L"Holding cleared for " + e.symbol);
 }
 
 void App::OnEditAlerts() {
-    assert(selected_ < cfg_.stockCount);
+    if (!HasStocks()) { return; }
     StockEntry& e = cfg_.stocks[selected_];
     Alert a = e.alert;
     if (!RunAlertsDialog(hInst_, hwnd_, e.symbol, a)) { return; }
@@ -934,32 +1118,26 @@ void App::OnEditAlerts() {
     SetStatus(L"Alerts saved for " + e.symbol);
 }
 
-// Re-reads stocktool.cfg (tickers, refresh interval, URL templates) without
-// restarting. Keeps the current selection if its symbol is still listed.
-void App::OnReloadConfig() {
-    assert(selected_ < cfg_.stockCount);
-    Config fresh;
-    std::wstring err;
-    if (!LoadConfig(cfg_.path, fresh, err)) {
-        SetStatus(L"Reload failed: " + err);   // keep running on the old config
-        return;
-    }
-    const std::wstring current = cfg_.stocks[selected_].symbol;
+// Swaps in a freshly loaded config: every per-ticker cache starts over.
+void App::ApplyConfig(const Config& fresh) {
+    const std::wstring current = HasStocks() ? cfg_.stocks[selected_].symbol : L"";
     size_t newSel = 0;
     for (size_t i = 0; i < fresh.stockCount; ++i) {
         if (SameSymbol(fresh.stocks[i].symbol, current)) { newSel = i; }
     }
-
     cfg_ = fresh;
     for (size_t i = 0; i < kMaxStocks; ++i) {
         (*summaries_)[i] = QuoteData{};
         chartValid_[i]   = false;
         insetValid_[i]   = false;
+        (*news_)[i]      = NewsCache{};
         alerts_[i]       = AlertState{};
     }
     quoteCount_ = 0;
     selected_   = newSel;
     RebuildList();
+    RebuildTabs();
+    RebuildListMenu();
     KillTimer(hwnd_, kRefreshTimer);
     SetTimer(hwnd_, kRefreshTimer, cfg_.refreshSeconds * 1000u, nullptr);
 
@@ -969,9 +1147,200 @@ void App::OnReloadConfig() {
     Layout();
     RequestAllSummaries();
     RequestQuotes();
-    SelectStock(newSel);
+    if (HasStocks()) { SelectStock(newSel); }
+    else             { RedrawAll(); }
+}
+
+// Re-reads stocktool.cfg (tickers, refresh interval, URL templates) without
+// restarting. Keeps the current selection if its symbol is still listed.
+void App::OnReloadConfig() {
+    Config fresh;
+    std::wstring err;
+    if (!LoadConfig(cfg_.path, cfg_.listName, fresh, err)) {
+        SetStatus(L"Reload failed: " + err);   // keep running on the old config
+        return;
+    }
+    ApplyConfig(fresh);
     SetStatus(L"Reloaded " + std::to_wstring(cfg_.stockCount) + L" tickers from " + cfg_.path);
-    assert(cfg_.stockCount >= 1 && newSel < cfg_.stockCount);
+}
+
+// ---------------------------------------------------------------------------
+// Watch lists
+
+void App::SwitchList(const std::wstring& name) {
+    if (SameSymbol(name, cfg_.listName)) { return; }
+    Config fresh;
+    std::wstring err;
+    if (!LoadConfig(cfg_.path, name, fresh, err)) {
+        SetStatus(L"Cannot open list: " + err);
+        return;
+    }
+    ApplyConfig(fresh);
+    SaveState();
+    SetStatus(L"Watch list: " + (cfg_.listName.empty() ? L"Watch list" : cfg_.listName));
+}
+
+void App::OnNewList() {
+    if (cfg_.listCount >= kMaxLists) {
+        SetStatus(L"Limit of " + std::to_wstring(kMaxLists) + L" watch lists reached");
+        return;
+    }
+    std::wstring name;
+    if (!RunListNameDialog(hInst_, hwnd_, L"Name for the new watch list:", name)) { return; }
+    for (size_t i = 0; i < cfg_.listCount; ++i) {
+        if (SameSymbol(cfg_.lists[i], name)) {
+            SetStatus(L"A list called " + name + L" already exists");
+            return;
+        }
+    }
+    std::wstring err;
+    if (!CreateList(cfg_.path, name, err)) {
+        SetStatus(err);
+        return;
+    }
+    SwitchList(name);
+}
+
+void App::OnRenameList() {
+    if (cfg_.listName.empty()) {
+        SetStatus(L"The default watch list cannot be renamed");
+        return;
+    }
+    std::wstring name = cfg_.listName;
+    if (!RunListNameDialog(hInst_, hwnd_, L"New name for " + cfg_.listName + L":", name)) { return; }
+    if (SameSymbol(name, cfg_.listName)) { return; }
+    for (size_t i = 0; i < cfg_.listCount; ++i) {
+        if (SameSymbol(cfg_.lists[i], name)) {
+            SetStatus(L"A list called " + name + L" already exists");
+            return;
+        }
+    }
+    std::wstring err;
+    if (!RenameList(cfg_.path, cfg_.listName, name, err)) {
+        SetStatus(err);
+        return;
+    }
+    Config fresh;
+    if (!LoadConfig(cfg_.path, name, fresh, err)) {
+        SetStatus(err);
+        return;
+    }
+    ApplyConfig(fresh);
+    SaveState();
+    SetStatus(L"Renamed list to " + name);
+}
+
+void App::OnDeleteList() {
+    if (cfg_.listName.empty()) {
+        SetStatus(L"The default watch list cannot be deleted");
+        return;
+    }
+    const std::wstring text = L"Delete the watch list \"" + cfg_.listName + L"\" and its " +
+                              std::to_wstring(cfg_.stockCount) + L" ticker(s)?";
+    if (MessageBoxW(hwnd_, text.c_str(), L"Delete list", MB_ICONQUESTION | MB_YESNO | MB_DEFBUTTON2) != IDYES) { return; }
+    std::wstring err;
+    const std::wstring gone = cfg_.listName;
+    if (!DeleteList(cfg_.path, gone, err)) {
+        SetStatus(err);
+        return;
+    }
+    Config fresh;
+    if (!LoadConfig(cfg_.path, L"", fresh, err)) {
+        SetStatus(err);
+        return;
+    }
+    ApplyConfig(fresh);
+    SaveState();
+    SetStatus(L"Deleted list " + gone);
+}
+
+// ---------------------------------------------------------------------------
+// CSV export
+
+bool App::SaveCsvDialog(const wchar_t* suggested, std::wstring& path) {
+    std::array<wchar_t, MAX_PATH> file{};
+    wcscpy_s(file.data(), file.size(), suggested);
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner   = hwnd_;
+    ofn.lpstrFilter = L"CSV files (*.csv)\0*.csv\0All files (*.*)\0*.*\0";
+    ofn.lpstrFile   = file.data();
+    ofn.nMaxFile    = static_cast<DWORD>(file.size());
+    ofn.lpstrDefExt = L"csv";
+    ofn.Flags       = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    if (!GetSaveFileNameW(&ofn)) { return false; }
+    path = file.data();
+    return !path.empty();
+}
+
+bool App::WriteTextFile(const std::wstring& path, const std::string& utf8, std::wstring& err) {
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        err = L"Cannot create " + path;
+        return false;
+    }
+    static const char kBom[] = "\xEF\xBB\xBF";   // so Excel reads UTF-8
+    DWORD written = 0;
+    const BOOL ok = WriteFile(h, kBom, 3, &written, nullptr) &&
+                    WriteFile(h, utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr);
+    CloseHandle(h);
+    if (!ok) {
+        err = L"Cannot write " + path;
+        return false;
+    }
+    return true;
+}
+
+void App::OnExportList() {
+    std::wstring path;
+    if (!SaveCsvDialog(L"watchlist.csv", path)) { return; }
+    std::string csv = "Symbol,Name,Currency,Last,Change,Change%,PrevClose,Shares,AvgCost,Value,52wHigh,52wLow\r\n";
+    for (size_t i = 0; i < cfg_.stockCount; ++i) {
+        const StockEntry& e  = cfg_.stocks[i];
+        const QuoteData&  q  = (*summaries_)[i];
+        const PriceChange pc = ComputeChange(q);
+        csv += CsvField(e.symbol) + "," + CsvField(e.name) + "," + CsvField(CurrencyOf(i)) + ",";
+        if (pc.valid) {
+            csv += CsvNum(pc.last, 2) + "," + CsvNum(pc.change, 2) + "," + CsvNum(pc.pct, 2) + "," + CsvNum(pc.prev, 2);
+        } else {
+            csv += ",,,";
+        }
+        csv += "," + (e.holding.qty > 0.0 ? CsvNum(e.holding.qty, 4) : "") +
+               "," + (e.holding.cost > 0.0 ? CsvNum(e.holding.cost, 4) : "") +
+               "," + (e.holding.qty > 0.0 && pc.valid ? CsvNum(e.holding.qty * pc.last, 2) : "") +
+               "," + (q.valid && q.meta.wk52High > 0.0 ? CsvNum(q.meta.wk52High, 2) : "") +
+               "," + (q.valid && q.meta.wk52Low > 0.0 ? CsvNum(q.meta.wk52Low, 2) : "") + "\r\n";
+    }
+    std::wstring err;
+    if (!WriteTextFile(path, csv, err)) { SetStatus(err); return; }
+    SetStatus(L"Exported " + std::to_wstring(cfg_.stockCount) + L" rows to " + path);
+}
+
+void App::OnExportChart() {
+    if (!HasStocks() || !chartValid_[selected_] || !(*charts_)[selected_].valid) {
+        SetStatus(L"No chart data to export yet");
+        return;
+    }
+    const QuoteData& q = (*charts_)[selected_];
+    const std::wstring suggested = cfg_.stocks[selected_].symbol + L"-" + kRanges[range_].label + L".csv";
+    std::wstring path;
+    if (!SaveCsvDialog(suggested.c_str(), path)) { return; }
+    const DateStyle ds = kRanges[range_].intraday ? DateStyle::FullTime : DateStyle::Full;
+    std::string csv = "Date,Open,High,Low,Close,Volume,Dividend\r\n";
+    for (size_t i = 0; i < q.series.count; ++i) {
+        const Candle& c = q.series.pts[i];
+        double div = 0.0;
+        for (size_t k = 0; k < q.dividendCount; ++k) {
+            const int64_t next = (i + 1 < q.series.count) ? q.series.pts[i + 1].time : INT64_MAX;
+            if (q.dividends[k].time >= c.time && q.dividends[k].time < next) { div += q.dividends[k].amount; }
+        }
+        csv += CsvField(FormatDate(c.time, q.meta.gmtOffsetSec, ds)) + "," + CsvNum(c.open, 4) + "," +
+               CsvNum(c.high, 4) + "," + CsvNum(c.low, 4) + "," + CsvNum(c.close, 4) + "," +
+               CsvNum(c.volume, 0) + "," + (div > 0.0 ? CsvNum(div, 4) : "") + "\r\n";
+    }
+    std::wstring err;
+    if (!WriteTextFile(path, csv, err)) { SetStatus(err); return; }
+    SetStatus(L"Exported " + std::to_wstring(q.series.count) + L" bars to " + path);
 }
 
 // ---------------------------------------------------------------------------
@@ -984,6 +1353,16 @@ void App::OnSize(WPARAM wp) {
     }
     Layout();
     RedrawAll();
+}
+
+LRESULT App::OnNotify(const NMHDR* hdr) {
+    assert(hdr != nullptr);
+    if (hdr->hwndFrom == hTabs_ && hdr->code == TCN_SELCHANGE) {
+        const int sel = TabCtrl_GetCurSel(hTabs_);
+        if (sel >= 0 && static_cast<size_t>(sel) < cfg_.listCount) { SwitchList(cfg_.lists[static_cast<size_t>(sel)]); }
+        return 0;
+    }
+    return 0;
 }
 
 void App::OnCommand(int id, UINT code) {
@@ -1000,6 +1379,15 @@ void App::OnCommand(int id, UINT code) {
         SelectRange(static_cast<size_t>(id - IDC_RANGE_BASE));
         return;
     }
+    if (id >= IDM_RANGE_BASE && id < IDM_RANGE_BASE + static_cast<int>(kRanges.size())) {
+        SelectRange(static_cast<size_t>(id - IDM_RANGE_BASE));
+        return;
+    }
+    if (id >= IDM_LIST_BASE && id < IDM_LIST_BASE + static_cast<int>(kMaxLists)) {
+        const size_t i = static_cast<size_t>(id - IDM_LIST_BASE);
+        if (i < cfg_.listCount) { SwitchList(cfg_.lists[i]); }
+        return;
+    }
     switch (id) {
     case IDC_STYLE:
     case IDM_CANDLES:   ToggleOption(state_.candles); break;
@@ -1010,6 +1398,7 @@ void App::OnCommand(int id, UINT code) {
     case IDM_BOLLINGER: ToggleOption(state_.bollinger); break;
     case IDM_RSI:       ToggleOption(state_.rsi); break;
     case IDM_INSET:     ToggleOption(state_.inset); RequestInset(false); break;
+    case IDM_NEWS:      ToggleOption(state_.news); Layout(); RequestNews(false); RedrawAll(); break;
     case IDM_THEME_SYSTEM: SetThemeMode(ThemeMode::System); break;
     case IDM_THEME_LIGHT:  SetThemeMode(ThemeMode::Light); break;
     case IDM_THEME_DARK:   SetThemeMode(ThemeMode::Dark); break;
@@ -1024,6 +1413,8 @@ void App::OnCommand(int id, UINT code) {
     case IDM_REFRESH:   OnTimer(); break;
     case IDC_RELOAD:
     case IDM_RELOAD:    OnReloadConfig(); break;
+    case IDM_EXPORT_LIST:  OnExportList(); break;
+    case IDM_EXPORT_CHART: OnExportChart(); break;
     case IDC_ADD:
     case IDM_ADD:       OnAddTicker(); break;
     case IDM_EDIT:      OnEditTicker(); break;
@@ -1033,6 +1424,9 @@ void App::OnCommand(int id, UINT code) {
     case IDM_MOVEDOWN:  OnMoveTicker(+1); break;
     case IDM_HOLDING:   OnEditHolding(); break;
     case IDM_ALERTS:    OnEditAlerts(); break;
+    case IDM_LIST_NEW:    OnNewList(); break;
+    case IDM_LIST_RENAME: OnRenameList(); break;
+    case IDM_LIST_DELETE: OnDeleteList(); break;
     case IDM_TRAY_SHOW: ShowFromTray(); break;
     case IDM_TRAY_EXIT:
     case IDM_EXIT:      PostMessageW(hwnd_, WM_CLOSE, 0, 0); break;
@@ -1069,6 +1463,10 @@ void App::OnTimer() {
     RequestQuotes();
     RequestChart(false);
     RequestInset(false);
+    RequestNews(false);
+    for (size_t i = 0; i < kMaxFx; ++i) {
+        if (fx_[i].valid) { fetcher_.EnqueueFx(fx_[i].from, fx_[i].to); }
+    }
 }
 
 void App::OnMouseMove(int x, int y, bool buttonDown) {
@@ -1115,6 +1513,64 @@ void App::OnMouseLeave() {
         hoverY_ = -1;
         InvalidateRect(hwnd_, &chartRect_, FALSE);
     }
+}
+
+// Headline row under the mouse, or -1.
+int App::NewsRowAt(int x, int y) const {
+    const POINT p{ x, y };
+    if (!state_.news || !HasStocks() || !PtInRect(&newsRect_, p)) { return -1; }
+    const NewsCache& nc = (*news_)[selected_];
+    const int rowH = Px(kNewsRowH);
+    const int top  = newsRect_.top + Px(22);
+    if (y < top) { return -1; }
+    const int row = (y - top) / rowH;
+    if (row < 0 || static_cast<size_t>(row) >= nc.count) { return -1; }
+    return row;
+}
+
+void App::OnLButtonDown(int x, int y) {
+    const int row = NewsRowAt(x, y);
+    if (row >= 0) {
+        const NewsItem& item = (*news_)[selected_].items[static_cast<size_t>(row)];
+        if (!item.link.empty()) {
+            // Opens the headline in the default browser (a user-initiated navigation).
+            ShellExecuteW(hwnd_, L"open", item.link.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        }
+        return;
+    }
+    RectF box;
+    if (!InsetHit(x, y, box)) { return; }
+    dragging_ = true;
+    dragDX_   = static_cast<float>(x) - box.X;
+    dragDY_   = static_cast<float>(y) - box.Y;
+    // Capture keeps moves coming while the cursor is outside the window; it
+    // is best effort (refused for a background window) - the drag itself
+    // follows the button state in the mouse messages, not the capture.
+    SetCapture(hwnd_);
+    SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
+}
+
+void App::OnLButtonUp(int x, int y) {
+    (void)x;
+    (void)y;
+    if (!dragging_) { return; }
+    dragging_ = false;
+    if (GetCapture() == hwnd_) { ReleaseCapture(); }
+    SaveState();   // remember the new spot right away
+    RedrawChart();
+}
+
+bool App::OnSetCursor() {
+    POINT p{};
+    if (!GetCursorPos(&p) || !ScreenToClient(hwnd_, &p)) { return false; }
+    if (NewsRowAt(p.x, p.y) >= 0) {
+        SetCursor(LoadCursorW(nullptr, IDC_HAND));
+        return true;
+    }
+    RectF box;
+    if (!dragging_ && !InsetHit(p.x, p.y, box)) { return false; }
+    SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
+    return true;
 }
 
 void App::OnDpiChanged(WPARAM wp, LPARAM lp) {
@@ -1164,6 +1620,7 @@ void App::OnSummaryReady(size_t stock) {
     CheckAlerts(stock, ComputeChange(q));
     UpdateTrayTip();
     InvalidateListItem(stock);
+    if (cfg_.stocks[stock].holding.qty > 0.0) { EnsureFxRates(); }
     if (ComputePortfolio().any) {
         if (portfolioRect_.bottom == portfolioRect_.top) { Layout(); }
         InvalidateRect(hwnd_, &portfolioRect_, FALSE);
@@ -1198,9 +1655,13 @@ void App::OnInsetReady(size_t stock, size_t range) {
     if (changed) { q = fresh; }
     insetValid_[stock] = true;
     if (stock == selected_) {
-        if (changed) { RedrawChart(); }
+        if (changed) {
+            RedrawChart();
+            InvalidateRect(hwnd_, &headerRect_, FALSE);   // dividend income line
+        }
         PrefetchOthers();
     }
+    if (cfg_.stocks[stock].holding.qty > 0.0) { InvalidateRect(hwnd_, &portfolioRect_, FALSE); }
 }
 
 void App::OnQuoteReady() {
@@ -1210,13 +1671,35 @@ void App::OnQuoteReady() {
     InvalidateRect(hwnd_, &statsRect_, FALSE);
 }
 
+void App::OnFxReady() {
+    if (!fetcher_.CopyFx(fx_)) { return; }
+    if (ComputePortfolio().any) {
+        if (portfolioRect_.bottom == portfolioRect_.top) { Layout(); }
+        InvalidateRect(hwnd_, &portfolioRect_, FALSE);
+    }
+    InvalidateRect(hwnd_, &headerRect_, FALSE);
+}
+
+void App::OnNewsReady(size_t stock) {
+    if (stock >= cfg_.stockCount) { return; }
+    NewsCache& nc = (*news_)[stock];
+    std::wstring symbol;
+    if (!fetcher_.CopyNews(stock, nc.items, nc.count, symbol, nc.error)) { return; }
+    if (!SameSymbol(symbol, cfg_.stocks[stock].symbol)) {
+        nc = NewsCache{};
+        return;
+    }
+    nc.valid = true;
+    if (stock == selected_) { InvalidateRect(hwnd_, &newsRect_, FALSE); }
+}
+
 // ---------------------------------------------------------------------------
 // Chart input / inset dragging
 
 ChartInput App::BuildChartInput() {
-    assert(selected_ < cfg_.stockCount);
     ChartInput in;
-    in.data           = chartValid_[selected_] ? &(*charts_)[selected_] : nullptr;
+    const bool has = HasStocks();
+    in.data           = (has && chartValid_[selected_]) ? &(*charts_)[selected_] : nullptr;
     in.range          = &kRanges[range_];
     in.opts.candles   = state_.candles;
     in.opts.sma20     = state_.sma20;
@@ -1224,7 +1707,7 @@ ChartInput App::BuildChartInput() {
     in.opts.bollinger = state_.bollinger;
     in.opts.rsi       = state_.rsi;
     in.opts.inset     = state_.inset;
-    in.inset          = insetValid_[selected_] ? &(*insets_)[selected_] : nullptr;
+    in.inset          = (has && insetValid_[selected_]) ? &(*insets_)[selected_] : nullptr;
     in.insetLabel     = kRanges[cfg_.insetRange].label;
     in.insetX         = state_.insetX;
     in.insetY         = state_.insetY;
@@ -1247,38 +1730,6 @@ bool App::InsetHit(int x, int y, RectF& box) {
     if (!PtInRect(&chartRect_, p)) { return false; }
     if (!ChartInsetRect(ToRectF(chartRect_), BuildChartInput(), scale_, box)) { return false; }
     return box.Contains(static_cast<float>(x), static_cast<float>(y)) != FALSE;
-}
-
-void App::OnLButtonDown(int x, int y) {
-    RectF box;
-    if (!InsetHit(x, y, box)) { return; }
-    dragging_ = true;
-    dragDX_   = static_cast<float>(x) - box.X;
-    dragDY_   = static_cast<float>(y) - box.Y;
-    // Capture keeps moves coming while the cursor is outside the window; it
-    // is best effort (refused for a background window) - the drag itself
-    // follows the button state in the mouse messages, not the capture.
-    SetCapture(hwnd_);
-    SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
-}
-
-void App::OnLButtonUp(int x, int y) {
-    (void)x;
-    (void)y;
-    if (!dragging_) { return; }
-    dragging_ = false;
-    if (GetCapture() == hwnd_) { ReleaseCapture(); }
-    SaveState();   // remember the new spot right away
-    RedrawChart();
-}
-
-bool App::OnSetCursor() {
-    POINT p{};
-    if (!GetCursorPos(&p) || !ScreenToClient(hwnd_, &p)) { return false; }
-    RectF box;
-    if (!dragging_ && !InsetHit(p.x, p.y, box)) { return false; }
-    SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
-    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1336,13 +1787,15 @@ void App::PaintChartLayer(Graphics& g, const ChartInput& in) {
         cg.SetSmoothingMode(SmoothingModeAntiAlias);
         cg.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
         cg.Clear(theme_->bg);
-        DrawChartBase(cg, RectF(0.0f, 0.0f, static_cast<REAL>(w), static_cast<REAL>(h)), in, scale_);
+        if (HasStocks()) {
+            DrawChartBase(cg, RectF(0.0f, 0.0f, static_cast<REAL>(w), static_cast<REAL>(h)), in, scale_);
+        }
         chartDirty_ = false;
     }
     const HDC hdc = g.GetHDC();
     BitBlt(hdc, chartRect_.left, chartRect_.top, w, h, chartDC_, 0, 0, SRCCOPY);
     g.ReleaseHDC(hdc);
-    DrawChartOverlay(g, ToRectF(chartRect_), in, scale_);
+    if (HasStocks()) { DrawChartOverlay(g, ToRectF(chartRect_), in, scale_); }
 }
 
 void App::OnPaint() {
@@ -1361,8 +1814,8 @@ void App::OnPaint() {
             g.Clear(theme_->bg);
             PaintHeader(g);
             PaintPortfolio(g);
-
             PaintChartLayer(g, BuildChartInput());
+            PaintNews(g);
             PaintStats(g);
             PaintStatus(g);
         }
@@ -1372,12 +1825,8 @@ void App::OnPaint() {
 }
 
 void App::PaintHeader(Graphics& g) {
-    assert(selected_ < cfg_.stockCount);
-    const StockEntry& entry = cfg_.stocks[selected_];
-    const QuoteData&  sum   = (*summaries_)[selected_];
-    const Theme&      th    = *theme_;
+    const Theme& th = *theme_;
     const RectF rc = ToRectF(headerRect_);
-
     const Font nameFont  = MakeFont(15.0f, scale_, FontStyleBold);
     const Font subFont   = MakeFont(9.5f, scale_);
     const Font priceFont = MakeFont(22.0f, scale_, FontStyleBold);
@@ -1387,6 +1836,17 @@ void App::PaintHeader(Graphics& g) {
     StringFormat left;
     left.SetFormatFlags(StringFormatFlagsNoWrap);
     left.SetTrimming(StringTrimmingEllipsisCharacter);
+
+    if (!HasStocks()) {
+        const std::wstring title = cfg_.listName.empty() ? L"Watch list" : cfg_.listName;
+        g.DrawString(title.c_str(), -1, &nameFont, RectF(rc.X, rc.Y, rc.Width, 26.0f * scale_), &left, &dark);
+        g.DrawString(L"This list is empty. Use Add… (Ctrl+N) to put tickers in it.", -1, &subFont,
+                     RectF(rc.X, rc.Y + 30.0f * scale_, rc.Width, 20.0f * scale_), &left, &grey);
+        return;
+    }
+    assert(selected_ < cfg_.stockCount);
+    const StockEntry& entry = cfg_.stocks[selected_];
+    const QuoteData&  sum   = (*summaries_)[selected_];
 
     const std::wstring name = (sum.valid && !sum.meta.longName.empty()) ? sum.meta.longName : entry.name;
     const float nameW = rc.Width * 0.62f;
@@ -1416,13 +1876,15 @@ void App::PaintHeader(Graphics& g) {
             line += L"  ·  Gain " + FormatSignedMoney(value - cost) + L" (" + FormatPct((value - cost) / cost * 100.0) + L")";
         }
         line += L"  ·  Day " + FormatSignedMoney(hd.qty * pc.change);
+        const double div = TrailingDividends(selected_);
+        if (!std::isnan(div) && div > 0.0) { line += L"  ·  Income ~" + FormatMoney(hd.qty * div) + L"/yr"; }
         SolidBrush gainBrush((cost > 0.0 && value < cost) ? th.down : th.up);
         g.DrawString(line.c_str(), -1, &subFont, RectF(rc.X, rc.Y + 50.0f * scale_, rc.Width, 20.0f * scale_), &left, &gainBrush);
     }
 
     StringFormat right;
     right.SetAlignment(StringAlignmentFar);
-    const std::wstring price = FormatPrice(pc.last) + L" " + sum.meta.currency;
+    const std::wstring price = FormatPrice(pc.last) + L" " + CurrencyOf(selected_);
     g.DrawString(price.c_str(), -1, &priceFont, RectF(rc.X, rc.Y - 2.0f * scale_, rc.Width, 34.0f * scale_), &right, &dark);
     SolidBrush chgBrush(pc.change >= 0.0 ? th.up : th.down);
     const std::wstring chg = FormatChange(pc.change, pc.pct);
@@ -1448,7 +1910,8 @@ void App::PaintPortfolio(Graphics& g) {
     g.DrawString(L"Portfolio", -1, &labelFont, PointF(rc.X + pad, rc.Y + 3.0f * scale_), &grey);
     StringFormat right;
     right.SetAlignment(StringAlignmentFar);
-    const std::wstring value = FormatMoney(p.value) + (p.currency.empty() ? L"" : L" " + p.currency);
+    std::wstring value = FormatMoney(p.value) + L" " + cfg_.portfolioCurrency;
+    if (p.partial) { value = L"… " + value; }   // an FX rate is still on its way
     g.DrawString(value.c_str(), -1, &valueFont, RectF(rc.X, rc.Y + 1.0f * scale_, rc.Width - pad, 20.0f * scale_), &right, &dark);
 
     std::wstring line = L"Day " + FormatSignedMoney(p.day);
@@ -1457,16 +1920,58 @@ void App::PaintPortfolio(Graphics& g) {
         line += L"   Total " + FormatSignedMoney(p.value - p.cost) + L" (" + FormatPct((p.value - p.cost) / p.cost * 100.0) + L")";
     }
     SolidBrush dayBrush(p.day >= 0.0 ? th.up : th.down);
-    g.DrawString(line.c_str(), -1, &subFont, PointF(rc.X + pad, rc.Y + 24.0f * scale_), &dayBrush);
+    StringFormat nowrap;
+    nowrap.SetFormatFlags(StringFormatFlagsNoWrap);
+    nowrap.SetTrimming(StringTrimmingEllipsisCharacter);
+    g.DrawString(line.c_str(), -1, &subFont, RectF(rc.X + pad, rc.Y + 24.0f * scale_, rc.Width - 2 * pad, 16.0f * scale_), &nowrap, &dayBrush);
+    if (p.income > 0.0) {
+        const std::wstring income = L"Dividend income ~" + FormatMoney(p.income) + L" " + cfg_.portfolioCurrency + L"/yr";
+        g.DrawString(income.c_str(), -1, &subFont, RectF(rc.X + pad, rc.Y + 40.0f * scale_, rc.Width - 2 * pad, 16.0f * scale_), &nowrap, &grey);
+    }
+}
+
+void App::PaintNews(Graphics& g) {
+    if (newsRect_.bottom <= newsRect_.top) { return; }
+    const Theme& th = *theme_;
+    const RectF rc = ToRectF(newsRect_);
+    Pen divider(th.listDivider, 1.0f);
+    g.DrawLine(&divider, rc.X, rc.Y, rc.X + rc.Width, rc.Y);
+    const Font labelFont = MakeFont(8.5f, scale_);
+    const Font rowFont   = MakeFont(9.5f, scale_);
+    SolidBrush grey(th.textMuted);
+    SolidBrush dark(th.text);
+    StringFormat left;
+    left.SetFormatFlags(StringFormatFlagsNoWrap);
+    left.SetTrimming(StringTrimmingEllipsisCharacter);
+    if (!HasStocks()) { return; }
+    const NewsCache& nc = (*news_)[selected_];
+    std::wstring title = L"News · " + cfg_.stocks[selected_].symbol;
+    if (!nc.valid) { title += L"  (loading…)"; }
+    else if (!nc.error.empty()) { title += L"  (" + nc.error + L")"; }
+    else if (nc.count == 0) { title += L"  (no headlines)"; }
+    g.DrawString(title.c_str(), -1, &labelFont, RectF(rc.X, rc.Y + 5.0f * scale_, rc.Width, 16.0f * scale_), &left, &grey);
+    const float rowH = static_cast<float>(Px(kNewsRowH));
+    float y = rc.Y + 22.0f * scale_;
+    for (size_t i = 0; i < nc.count && i < kMaxNews; ++i) {
+        if (y + rowH > rc.Y + rc.Height) { break; }
+        const NewsItem& item = nc.items[i];
+        std::wstring line;
+        if (item.time > 0) { line += FormatDate(item.time, 0, DateStyle::DayMonth) + L"  "; }
+        if (!item.publisher.empty()) { line += item.publisher + L"  —  "; }
+        line += item.title;
+        g.DrawString(line.c_str(), -1, &rowFont, RectF(rc.X, y, rc.Width, rowH), &left, &dark);
+        y += rowH;
+    }
 }
 
 void App::PaintStats(Graphics& g) {
-    assert(selected_ < cfg_.stockCount);
-    const QuoteData& sum = (*summaries_)[selected_];
     const Theme& th = *theme_;
     const RectF rc = ToRectF(statsRect_);
     Pen divider(th.listDivider, 1.0f);
     g.DrawLine(&divider, rc.X, rc.Y, rc.X + rc.Width, rc.Y);
+    if (!HasStocks()) { return; }
+    assert(selected_ < cfg_.stockCount);
+    const QuoteData& sum = (*summaries_)[selected_];
     if (!sum.valid) { return; }
 
     const QuoteMeta& m = sum.meta;
@@ -1486,6 +1991,11 @@ void App::PaintStats(Graphics& g) {
     if (qs != nullptr && qs->dividendYieldPct > 0.0) {
         yield = FormatPrice(qs->dividendYieldPct) + L"%";
         if (qs->dividendRate > 0.0) { yield += L" (" + FormatPrice(qs->dividendRate) + L")"; }
+    } else {
+        const double div = TrailingDividends(selected_);
+        if (!std::isnan(div) && div > 0.0 && pc.valid && pc.last > 0.0) {
+            yield = FormatPrice(div / pc.last * 100.0) + L"% (" + FormatPrice(div) + L")";
+        }
     }
     std::wstring open = today ? FormatPrice(today->open) : dash;
     if (open == dash && qs != nullptr && qs->open > 0.0) { open = FormatPrice(qs->open); }

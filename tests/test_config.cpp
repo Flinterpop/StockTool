@@ -57,7 +57,7 @@ TEST_CASE("LoadConfig reads settings, stocks, holdings and alerts") {
     ini.Write(kIni);
     Config cfg;
     std::wstring err;
-    REQUIRE(LoadConfig(ini.path, cfg, err));
+    REQUIRE(LoadConfig(ini.path, L"", cfg, err));
     CHECK(cfg.refreshSeconds == 10u);
     CHECK(cfg.defaultRange == kRange5Y);
     CHECK(cfg.insetRange == kRange5Y);
@@ -83,14 +83,14 @@ TEST_CASE("LoadConfig rejects a file without stocks or a bad template") {
     Config cfg;
     std::wstring err;
     ini.Write("[settings]\r\nrefresh_seconds=60\r\n");
-    CHECK_FALSE(LoadConfig(ini.path, cfg, err));
+    CHECK_FALSE(LoadConfig(ini.path, L"", cfg, err));
     CHECK(err.find(L"No stocks") != std::wstring::npos);
 
     ini.Write("[settings]\r\nurl_template=https://x/no-placeholder\r\n[stocks]\r\nA=A\r\n");
-    CHECK_FALSE(LoadConfig(ini.path, cfg, err));
+    CHECK_FALSE(LoadConfig(ini.path, L"", cfg, err));
     CHECK(err.find(L"{symbol}") != std::wstring::npos);
 
-    CHECK_FALSE(LoadConfig(L"C:\\does\\not\\exist\\x.cfg", cfg, err));
+    CHECK_FALSE(LoadConfig(L"C:\\does\\not\\exist\\x.cfg", L"", cfg, err));
 }
 
 TEST_CASE("Write/Delete/Reorder round-trip through the file") {
@@ -98,15 +98,15 @@ TEST_CASE("Write/Delete/Reorder round-trip through the file") {
     ini.Write(kIni);
     Config cfg;
     std::wstring err;
-    REQUIRE(LoadConfig(ini.path, cfg, err));
+    REQUIRE(LoadConfig(ini.path, L"", cfg, err));
 
     StockEntry td;
     td.symbol = L"TD.TO";
     td.name   = L"Toronto-Dominion Bank";
     td.holding = { 10.0, 80.0 };
     td.alert   = { 95.0, 0.0 };
-    REQUIRE(WriteStockEntry(ini.path, td, err));
-    REQUIRE(LoadConfig(ini.path, cfg, err));
+    REQUIRE(WriteStockEntry(cfg, td, err));
+    REQUIRE(LoadConfig(ini.path, L"", cfg, err));
     REQUIRE(cfg.stockCount == 3);
     CHECK(cfg.stocks[2].symbol == L"TD.TO");
     CHECK(cfg.stocks[2].holding.qty == Approx(10.0));
@@ -114,21 +114,21 @@ TEST_CASE("Write/Delete/Reorder round-trip through the file") {
 
     // Move TD.TO to the front and rewrite the section.
     std::swap(cfg.stocks[0], cfg.stocks[2]);
-    REQUIRE(WriteStockOrder(ini.path, cfg, err));
-    REQUIRE(LoadConfig(ini.path, cfg, err));
+    REQUIRE(WriteStockOrder(cfg, err));
+    REQUIRE(LoadConfig(ini.path, L"", cfg, err));
     REQUIRE(cfg.stockCount == 3);
     CHECK(cfg.stocks[0].symbol == L"TD.TO");
     CHECK(cfg.stocks[2].symbol == L"RY.TO");
     CHECK(cfg.stocks[2].holding.qty == Approx(100.0));  // holdings survive a reorder
 
-    REQUIRE(DeleteStockEntry(ini.path, L"TD.TO", err));
-    REQUIRE(LoadConfig(ini.path, cfg, err));
+    REQUIRE(DeleteStockEntry(cfg, L"TD.TO", err));
+    REQUIRE(LoadConfig(ini.path, L"", cfg, err));
     CHECK(cfg.stockCount == 2);
     CHECK(cfg.stocks[0].symbol == L"DOL.TO");
 
     // Clearing a holding removes the key.
     REQUIRE(WriteHolding(ini.path, L"RY.TO", Holding{}, err));
-    REQUIRE(LoadConfig(ini.path, cfg, err));
+    REQUIRE(LoadConfig(ini.path, L"", cfg, err));
     CHECK(cfg.stocks[1].holding.qty == 0.0);
 }
 
@@ -162,7 +162,7 @@ TEST_CASE("View state round-trips") {
 
     // Saved settings do not disturb LoadConfig.
     Config cfg;
-    REQUIRE(LoadConfig(ini.path, cfg, err));
+    REQUIRE(LoadConfig(ini.path, L"", cfg, err));
     CHECK(cfg.stockCount == 2);
 }
 
@@ -189,4 +189,82 @@ TEST_CASE("NormalizeSymbol and NormalizeName") {
     CHECK(NormalizeName(L"  Royal\r\nBank  ", L"X") == L"RoyalBank");
     CHECK(NormalizeName(L"   ", L"FALLBACK") == L"FALLBACK");
     CHECK(NormalizeName(std::wstring(100, L'n'), L"X").size() == 63);
+}
+
+TEST_CASE("Watch lists: create, switch, rename, delete; shared holdings survive") {
+    TempIni ini;
+    ini.Write(kIni);
+    Config cfg;
+    std::wstring err;
+    REQUIRE(LoadConfig(ini.path, L"", cfg, err));
+    CHECK(cfg.listCount == 1);
+    CHECK(cfg.listName.empty());
+
+    REQUIRE(CreateList(ini.path, L"Banks", err));
+    REQUIRE(LoadConfig(ini.path, L"Banks", cfg, err));
+    CHECK(cfg.listCount == 2);
+    CHECK(cfg.lists[1] == L"Banks");
+    CHECK(cfg.listName == L"Banks");
+    CHECK(cfg.stockCount == 0);          // a new named list starts empty
+
+    StockEntry ry;
+    ry.symbol = L"RY.TO";
+    ry.name   = L"Royal Bank";
+    ry.currency = L"cad";
+    REQUIRE(WriteStockEntry(cfg, ry, err));
+    REQUIRE(LoadConfig(ini.path, L"Banks", cfg, err));
+    REQUIRE(cfg.stockCount == 1);
+    CHECK(cfg.stocks[0].holding.qty == Approx(100.0));   // holding is shared by symbol
+    CHECK(cfg.stocks[0].currency == L"CAD");
+
+    // Removing RY.TO from Banks must keep its holding: it is still in the default list.
+    REQUIRE(DeleteStockEntry(cfg, L"RY.TO", err));
+    REQUIRE(LoadConfig(ini.path, L"", cfg, err));
+    CHECK(cfg.stocks[0].symbol == L"RY.TO");
+    CHECK(cfg.stocks[0].holding.qty == Approx(100.0));
+
+    REQUIRE(RenameList(ini.path, L"Banks", L"Big Five", err));
+    REQUIRE(LoadConfig(ini.path, L"Big Five", cfg, err));
+    CHECK(cfg.listName == L"Big Five");
+    CHECK(cfg.listCount == 2);
+
+    REQUIRE(DeleteList(ini.path, L"Big Five", err));
+    REQUIRE(LoadConfig(ini.path, L"Big Five", cfg, err));   // unknown list falls back
+    CHECK(cfg.listName.empty());
+    CHECK(cfg.listCount == 1);
+}
+
+TEST_CASE("NormalizeCurrency and NormalizeListName") {
+    std::wstring c = L" usd ";
+    std::wstring err;
+    REQUIRE(NormalizeCurrency(c, err));
+    CHECK(c == L"USD");
+    c = L"";
+    REQUIRE(NormalizeCurrency(c, err));   // blank = no override
+    c = L"US";
+    CHECK_FALSE(NormalizeCurrency(c, err));
+    c = L"U$D";
+    CHECK_FALSE(NormalizeCurrency(c, err));
+
+    std::wstring n = L"  Big Five ";
+    REQUIRE(NormalizeListName(n, err));
+    CHECK(n == L"Big Five");
+    n = L"a.b";
+    CHECK_FALSE(NormalizeListName(n, err));
+    n = std::wstring(30, L'x');
+    CHECK_FALSE(NormalizeListName(n, err));
+    n = L"";
+    CHECK_FALSE(NormalizeListName(n, err));
+}
+
+TEST_CASE("portfolio_currency and news template are read") {
+    TempIni ini;
+    ini.Write("[settings]\r\nportfolio_currency=usd\r\nnews_url_template=\r\n[stocks]\r\nA=A\r\n");
+    Config cfg;
+    std::wstring err;
+    REQUIRE(LoadConfig(ini.path, L"", cfg, err));
+    CHECK(cfg.portfolioCurrency == L"USD");
+    CHECK(cfg.newsUrlTemplate.empty());
+    ini.Write("[settings]\r\nnews_url_template=https://x/no-placeholder\r\n[stocks]\r\nA=A\r\n");
+    CHECK_FALSE(LoadConfig(ini.path, L"", cfg, err));
 }

@@ -29,6 +29,14 @@ struct Series {
     std::array<Candle, kMaxPoints> pts{};
 };
 
+// Cash dividend event (from the chart endpoint's events=div).
+constexpr size_t kMaxDividends = 64;
+
+struct Dividend {
+    int64_t time   = 0;   // ex-date, Unix seconds
+    double  amount = 0.0; // per share
+};
+
 // Fields lifted from the provider's chart "meta" block.
 struct QuoteMeta {
     std::wstring currency;
@@ -51,7 +59,32 @@ struct QuoteData {
     std::wstring error;
     QuoteMeta    meta;
     Series       series;
+    size_t       dividendCount = 0;
+    std::array<Dividend, kMaxDividends> dividends{};   // ascending by time
 };
+
+// One headline from the news endpoint.
+constexpr size_t kMaxNews = 8;
+
+struct NewsItem {
+    std::wstring title;
+    std::wstring publisher;
+    std::wstring link;
+    int64_t      time = 0;   // Unix seconds
+};
+
+// Cached FX rate: 1 unit of `from` = `rate` units of `to`.
+constexpr size_t kMaxFx = 8;
+
+struct FxRate {
+    std::wstring from;
+    std::wstring to;
+    double       rate  = 0.0;
+    bool         valid = false;
+};
+
+// Watch lists: the default [stocks] section plus named [stocks.<name>] ones.
+constexpr size_t kMaxLists = 8;
 
 // Fundamentals from the (optional) batch quote endpoint. Zero = unknown.
 struct QuoteStats {

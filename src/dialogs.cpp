@@ -152,6 +152,7 @@ void AddCurrent(HWND dlg, AddState& st) {
     ++st.added;
     SetDlgItemTextW(dlg, IDC_SYMBOL, L"");
     SetDlgItemTextW(dlg, IDC_NAME, L"");
+    SetDlgItemTextW(dlg, IDC_CURRENCY, L"");
     SetDlgItemTextW(dlg, IDC_HINT, (L"Added " + st.result.symbol + L". Add another, or Close.").c_str());
     const HWND query = GetDlgItem(dlg, IDC_QUERY);
     if (IsWindowEnabled(query)) {
@@ -177,9 +178,15 @@ bool ReadAddFields(HWND dlg, AddState& st) {
             return false;
         }
     }
+    std::wstring currency = FieldText(dlg, IDC_CURRENCY);
+    if (!NormalizeCurrency(currency, err)) {
+        SetDlgItemTextW(dlg, IDC_HINT, err.c_str());
+        return false;
+    }
     if (!st.Editing()) { st.result = StockEntry{}; }   // edit mode keeps holding/alert
-    st.result.symbol = symbol;
-    st.result.name   = NormalizeName(FieldText(dlg, IDC_NAME), symbol);
+    st.result.symbol   = symbol;
+    st.result.name     = NormalizeName(FieldText(dlg, IDC_NAME), symbol);
+    st.result.currency = currency;
     assert(!st.result.symbol.empty() && !st.result.name.empty());
     return true;
 }
@@ -193,6 +200,7 @@ INT_PTR CALLBACK AddProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
         SendDlgItemMessageW(dlg, IDC_QUERY, EM_LIMITTEXT, 64, 0);
         SendDlgItemMessageW(dlg, IDC_SYMBOL, EM_LIMITTEXT, 31, 0);
         SendDlgItemMessageW(dlg, IDC_NAME, EM_LIMITTEXT, 63, 0);
+        SendDlgItemMessageW(dlg, IDC_CURRENCY, EM_LIMITTEXT, 3, 0);
         const int tab = 60;  // dialog units: symbol column, then name
         SendDlgItemMessageW(dlg, IDC_RESULTS, LB_SETTABSTOPS, 1, reinterpret_cast<LPARAM>(&tab));
         if (st->Editing()) {
@@ -201,6 +209,7 @@ INT_PTR CALLBACK AddProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
             SetDlgItemTextW(dlg, IDCANCEL, L"Cancel");
             SetDlgItemTextW(dlg, IDC_SYMBOL, st->result.symbol.c_str());
             SetDlgItemTextW(dlg, IDC_NAME, st->result.name.c_str());
+            SetDlgItemTextW(dlg, IDC_CURRENCY, st->result.currency.c_str());
             SetDlgItemTextW(dlg, IDC_HINT, L"Change the symbol or name, or search for the right listing.");
         }
         if (!st->fetcher->SearchEnabled()) {
@@ -410,6 +419,67 @@ bool RunHoldingDialog(HINSTANCE inst, HWND owner, const std::wstring& symbol, Ho
                                        reinterpret_cast<LPARAM>(&st));
     if (rc != IDOK) { return false; }
     h = st.value;
+    return true;
+}
+
+namespace {
+
+struct ListNameState {
+    std::wstring title;
+    std::wstring name;
+};
+
+INT_PTR CALLBACK ListNameProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_INITDIALOG: {
+        SetWindowLongPtrW(dlg, DWLP_USER, static_cast<LONG_PTR>(lp));
+        auto* st = reinterpret_cast<ListNameState*>(lp);
+        assert(st != nullptr);
+        SetDlgItemTextW(dlg, IDC_LTITLE, st->title.c_str());
+        SetDlgItemTextW(dlg, IDC_LISTNAME, st->name.c_str());
+        SendDlgItemMessageW(dlg, IDC_LISTNAME, EM_LIMITTEXT, 24, 0);
+        SendDlgItemMessageW(dlg, IDC_LISTNAME, EM_SETSEL, 0, -1);
+        CentreOnOwner(dlg);
+        return TRUE;
+    }
+    case WM_COMMAND: {
+        const int id = LOWORD(wp);
+        if (id == IDOK) {
+            auto* st = reinterpret_cast<ListNameState*>(GetWindowLongPtrW(dlg, DWLP_USER));
+            assert(st != nullptr);
+            std::wstring name = FieldText(dlg, IDC_LISTNAME);
+            std::wstring err;
+            if (st == nullptr || !NormalizeListName(name, err)) {
+                SetDlgItemTextW(dlg, IDC_LHINT, err.c_str());
+                return TRUE;
+            }
+            st->name = name;
+            EndDialog(dlg, IDOK);
+            return TRUE;
+        }
+        if (id == IDCANCEL) {
+            EndDialog(dlg, IDCANCEL);
+            return TRUE;
+        }
+        return FALSE;
+    }
+    default:
+        return FALSE;
+    }
+}
+
+} // namespace
+
+bool RunListNameDialog(HINSTANCE inst, HWND owner, const std::wstring& title, std::wstring& name) {
+    assert(inst != nullptr && owner != nullptr);
+    ListNameState st;
+    st.title = title;
+    st.name  = name;
+    const INT_PTR rc = DialogBoxParamW(inst, MAKEINTRESOURCEW(IDD_LISTNAME), owner, &ListNameProc,
+                                       reinterpret_cast<LPARAM>(&st));
+    if (rc != IDOK) { return false; }
+    name = st.name;
+    assert(!name.empty());
     return true;
 }
 

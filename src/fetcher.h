@@ -13,7 +13,7 @@
 
 namespace st {
 
-enum class JobKind : uint8_t { Summary, Chart, Inset, Quote, Search };
+enum class JobKind : uint8_t { Summary, Chart, Inset, Quote, Search, Fx, News };
 
 struct FetchJob {
     JobKind      kind   = JobKind::Summary;
@@ -21,6 +21,7 @@ struct FetchJob {
     size_t       range  = 0;   // index into kRanges (Chart/Inset)
     std::wstring symbol;       // captured at enqueue time; the worker never reads Config
     std::wstring url;          // likewise, built from the template at enqueue time
+    std::wstring aux;          // Fx: "FROM|TO"
     HWND         notify = nullptr;  // Search only: window that receives the result
 };
 
@@ -30,6 +31,8 @@ constexpr UINT WM_APP_CHART_READY   = WM_APP + 2;  // wParam = stock, lParam = r
 constexpr UINT WM_APP_INSET_READY   = WM_APP + 3;  // wParam = stock, lParam = range
 constexpr UINT WM_APP_QUOTE_READY   = WM_APP + 4;  // fundamentals for all symbols
 constexpr UINT WM_APP_SEARCH_READY  = WM_APP + 5;  // posted to the search job's notify window
+constexpr UINT WM_APP_FX_READY      = WM_APP + 6;  // an FX rate arrived (see CopyFx)
+constexpr UINT WM_APP_NEWS_READY    = WM_APP + 7;  // wParam = stock
 
 class Fetcher {
 public:
@@ -46,7 +49,8 @@ public:
     void UpdateConfig(const Config& cfg);
 
     // Queues a job for stock `stock` (duplicates are coalesced). False if the
-    // queue is full or the index is out of range.
+    // queue is full or the index is out of range. Kinds: Summary, Chart,
+    // Inset, News.
     bool Enqueue(JobKind kind, size_t stock, size_t range);
 
     // Queues one batch fundamentals request for every configured symbol.
@@ -58,6 +62,11 @@ public:
     // False when the feature is disabled or the query is empty.
     bool EnqueueSearch(const std::wstring& query, HWND notify);
     bool SearchEnabled() const { return !cfg_.searchUrlTemplate.empty(); }
+    bool NewsEnabled() const { return !cfg_.newsUrlTemplate.empty(); }
+
+    // Queues an FX rate fetch (from -> to, e.g. USD -> CAD) via the chart
+    // endpoint's "FROMTO=X" symbols.
+    bool EnqueueFx(const std::wstring& from, const std::wstring& to);
 
     // Copy the latest result for the UI thread. False if none / stale. The
     // caller must compare QuoteData::symbol with what it expects at `stock`.
@@ -67,14 +76,20 @@ public:
     bool CopyQuotes(std::array<QuoteStats, kMaxStocks>& out, size_t& count, std::wstring& err);
     bool CopySearch(std::array<SearchHit, kMaxSearchHits>& out, size_t& count,
                     std::wstring& query, std::wstring& err);
+    bool CopyFx(std::array<FxRate, kMaxFx>& out);
+    bool CopyNews(size_t stock, std::array<NewsItem, kMaxNews>& out, size_t& count,
+                  std::wstring& symbol, std::wstring& err);
 
 private:
     static unsigned __stdcall ThreadEntry(void* arg);
     void Run();
     bool Pop(FetchJob& job);
+    bool Push(const FetchJob& job, bool front);
     void Process(const FetchJob& job);
     void ProcessQuote(const FetchJob& job);
     void ProcessSearch(const FetchJob& job);
+    void ProcessFx(const FetchJob& job);
+    void ProcessNews(const FetchJob& job);
     bool Fetch(const std::wstring& url, QuoteData& out);
     bool EnsureCrumb(std::wstring& err);
     std::wstring BuildUrl(const std::wstring& symbol, const RangeSpec& spec) const;
@@ -112,6 +127,15 @@ private:
     size_t       searchCount_ = 0;
     std::wstring searchQuery_;
     std::wstring searchError_;
+    std::array<FxRate, kMaxFx> fx_{};
+    struct NewsSlot {
+        std::array<NewsItem, kMaxNews> items{};
+        size_t       count = 0;
+        std::wstring symbol;
+        std::wstring error;
+        bool         valid = false;
+    };
+    std::unique_ptr<std::array<NewsSlot, kMaxStocks>> news_;
 };
 
 } // namespace st

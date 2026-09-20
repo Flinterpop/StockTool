@@ -163,3 +163,36 @@ TEST_CASE("quote JSON: auth failure is reported") {
     CHECK(count == 0);
     CHECK(err.find(L"Crumb") != std::wstring::npos);
 }
+
+TEST_CASE("chart JSON: dividend events are parsed and sorted by time") {
+    constexpr char kJson[] = R"({"chart":{"result":[{"meta":{"regularMarketPrice":10},
+      "timestamp":[1000,2000,3000],"indicators":{"quote":[{"close":[1,2,3]}]},
+      "events":{"dividends":{"2500":{"amount":0.5,"date":2500},"1500":{"amount":0.4,"date":1500},
+                             "bad":{"amount":0,"date":1700}}}}],"error":null}})";
+    QuoteData q;
+    std::wstring err;
+    REQUIRE(ParseChartJson(kJson, std::strlen(kJson), q, err));
+    REQUIRE(q.dividendCount == 2);          // the zero-amount entry is dropped
+    CHECK(q.dividends[0].time == 1500);
+    CHECK(q.dividends[0].amount == Approx(0.4));
+    CHECK(q.dividends[1].time == 2500);
+    CHECK(q.dividends[1].amount == Approx(0.5));
+}
+
+TEST_CASE("news JSON: headlines with publisher, link and time") {
+    constexpr char kJson[] = R"({"quotes":[],"news":[
+      {"title":"Bank posts record quarter","publisher":"Reuters","link":"https://example.test/a","providerPublishTime":1789761600},
+      {"title":"","publisher":"x","link":"https://example.test/b"},
+      {"title":"Second headline","link":"https://example.test/c","providerPublishTime":1789700000}]})";
+    std::array<NewsItem, kMaxNews> out{};
+    size_t count = 0;
+    std::wstring err;
+    REQUIRE(ParseNewsJson(kJson, std::strlen(kJson), out, count, err));
+    REQUIRE(count == 2);                    // the untitled item is skipped
+    CHECK(out[0].title == L"Bank posts record quarter");
+    CHECK(out[0].publisher == L"Reuters");
+    CHECK(out[0].link == L"https://example.test/a");
+    CHECK(out[0].time == 1789761600);
+    CHECK(out[1].publisher.empty());
+    CHECK_FALSE(ParseNewsJson("{}", 2, out, count, err));
+}

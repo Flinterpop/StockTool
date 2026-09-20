@@ -18,6 +18,8 @@
 !/tools/*.py
 !/tests/
 !/tests/*.cpp
+!/installer/
+!/installer/*.iss
 
 # ---- Generated (last match wins) -------------------------------------------
 build/
@@ -25,3 +27,4 @@ out/
 .vs/
 *.user
 __pycache__/
+installer/Output/

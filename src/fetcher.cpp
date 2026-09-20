@@ -33,7 +33,7 @@ Fetcher::~Fetcher() { Stop(); }
 
 bool Fetcher::Start(HWND notify, const Config& cfg, std::wstring& err) {
     assert(notify != nullptr);
-    assert(cfg.stockCount > 0 && cfg.stockCount <= kMaxStocks);
+    assert(cfg.stockCount <= kMaxStocks);
     if (thread_ != nullptr) {
         err = L"Fetcher already started";
         return false;
@@ -47,6 +47,7 @@ bool Fetcher::Start(HWND notify, const Config& cfg, std::wstring& err) {
     insets_    = std::make_unique<std::array<QuoteData, kMaxStocks>>();
     quotes_    = std::make_unique<std::array<QuoteStats, kMaxStocks>>();
     search_    = std::make_unique<std::array<SearchHit, kMaxSearchHits>>();
+    news_      = std::make_unique<std::array<NewsSlot, kMaxStocks>>();
     stop_      = false;
 
     unsigned id = 0;
@@ -86,9 +87,13 @@ void Fetcher::Run() {
     for (;;) {
         FetchJob job;
         if (!Pop(job)) { return; }
-        if (job.kind == JobKind::Quote)       { ProcessQuote(job); }
-        else if (job.kind == JobKind::Search) { ProcessSearch(job); }
-        else                                  { Process(job); }
+        switch (job.kind) {
+        case JobKind::Quote:  ProcessQuote(job); break;
+        case JobKind::Search: ProcessSearch(job); break;
+        case JobKind::Fx:     ProcessFx(job); break;
+        case JobKind::News:   ProcessNews(job); break;
+        default:              Process(job); break;
+        }
     }
 }
 
@@ -103,6 +108,29 @@ bool Fetcher::Pop(FetchJob& job) {
     return true;
 }
 
+// Adds a job unless an identical one is pending. `front` makes it next.
+bool Fetcher::Push(const FetchJob& job, bool front) {
+    {
+        std::lock_guard<std::mutex> lock(qMutex_);
+        for (size_t k = 0; k < qCount_; ++k) {
+            const FetchJob& q = queue_[(qHead_ + k) % kMaxJobs];
+            if (q.kind == job.kind && q.stock == job.stock && q.range == job.range && q.aux == job.aux) {
+                return true;  // already pending
+            }
+        }
+        if (qCount_ >= kMaxJobs) { return false; }
+        if (front) {
+            qHead_ = (qHead_ + kMaxJobs - 1) % kMaxJobs;
+            queue_[qHead_] = job;
+        } else {
+            queue_[(qHead_ + qCount_) % kMaxJobs] = job;
+        }
+        ++qCount_;
+    }
+    qCv_.notify_one();
+    return true;
+}
+
 void Fetcher::UpdateConfig(const Config& cfg) {
     assert(cfg.stockCount <= kMaxStocks);
     cfg_ = cfg;
@@ -112,31 +140,25 @@ void Fetcher::UpdateConfig(const Config& cfg) {
 
 bool Fetcher::Enqueue(JobKind kind, size_t stock, size_t range) {
     assert(thread_ != nullptr);
-    assert(kind == JobKind::Summary || kind == JobKind::Chart || kind == JobKind::Inset);
     assert(stock < cfg_.stockCount);
     assert(range < kRanges.size());
-    if (stock >= cfg_.stockCount || range >= kRanges.size() ||
-        (kind != JobKind::Summary && kind != JobKind::Chart && kind != JobKind::Inset)) { return false; }
-    {
-        std::lock_guard<std::mutex> lock(qMutex_);
-        for (size_t k = 0; k < qCount_; ++k) {
-            const FetchJob& q = queue_[(qHead_ + k) % kMaxJobs];
-            if (q.kind == kind && q.stock == stock && q.range == range) {
-                return true;  // already pending
-            }
-        }
-        if (qCount_ >= kMaxJobs) { return false; }
+    const bool kindOk = kind == JobKind::Summary || kind == JobKind::Chart ||
+                        kind == JobKind::Inset || kind == JobKind::News;
+    if (!kindOk || stock >= cfg_.stockCount || range >= kRanges.size()) { return false; }
+    if (kind == JobKind::News && cfg_.newsUrlTemplate.empty()) { return false; }
+    FetchJob job;
+    job.kind   = kind;
+    job.stock  = stock;
+    job.range  = range;
+    job.symbol = cfg_.stocks[stock].symbol;
+    if (kind == JobKind::News) {
+        job.url = cfg_.newsUrlTemplate;
+        ReplaceAll(job.url, L"{symbol}", UrlEncode(job.symbol));
+    } else {
         const RangeSpec& spec = (kind == JobKind::Summary) ? kSummarySpec : kRanges[range];
-        FetchJob& slot = queue_[(qHead_ + qCount_) % kMaxJobs];
-        slot.kind   = kind;
-        slot.stock  = stock;
-        slot.range  = range;
-        slot.symbol = cfg_.stocks[stock].symbol;
-        slot.url    = BuildUrl(slot.symbol, spec);
-        ++qCount_;
+        job.url = BuildUrl(job.symbol, spec);
     }
-    qCv_.notify_one();
-    return true;
+    return Push(job, false);
 }
 
 bool Fetcher::EnqueueQuote() {
@@ -147,32 +169,24 @@ bool Fetcher::EnqueueQuote() {
         if (i > 0) { symbols += L","; }
         symbols += UrlEncode(cfg_.stocks[i].symbol);
     }
-    std::wstring url = cfg_.quoteUrlTemplate;
-    ReplaceAll(url, L"{symbols}", symbols);  // {crumb} is filled in by the worker
-    {
-        std::lock_guard<std::mutex> lock(qMutex_);
-        for (size_t k = 0; k < qCount_; ++k) {
-            if (queue_[(qHead_ + k) % kMaxJobs].kind == JobKind::Quote) { return true; }
-        }
-        if (qCount_ >= kMaxJobs) { return false; }
-        FetchJob& slot = queue_[(qHead_ + qCount_) % kMaxJobs];
-        slot.kind   = JobKind::Quote;
-        slot.stock  = 0;
-        slot.range  = 0;
-        slot.symbol = L"*";
-        slot.url    = url;
-        ++qCount_;
-    }
-    qCv_.notify_one();
-    return true;
+    FetchJob job;
+    job.kind   = JobKind::Quote;
+    job.symbol = L"*";
+    job.url    = cfg_.quoteUrlTemplate;
+    ReplaceAll(job.url, L"{symbols}", symbols);  // {crumb} is filled in by the worker
+    return Push(job, false);
 }
 
 bool Fetcher::EnqueueSearch(const std::wstring& query, HWND notify) {
     assert(thread_ != nullptr);
     assert(notify != nullptr);
     if (cfg_.searchUrlTemplate.empty() || query.empty() || query.size() > 64) { return false; }
-    std::wstring url = cfg_.searchUrlTemplate;
-    ReplaceAll(url, L"{query}", UrlEncode(query));
+    FetchJob job;
+    job.kind   = JobKind::Search;
+    job.symbol = query;
+    job.url    = cfg_.searchUrlTemplate;
+    job.notify = notify;
+    ReplaceAll(job.url, L"{query}", UrlEncode(query));
     {
         std::lock_guard<std::mutex> lock(qMutex_);
         // Drop any search still waiting: only the newest query matters.
@@ -185,20 +199,19 @@ bool Fetcher::EnqueueSearch(const std::wstring& query, HWND notify) {
             ++kept;
         }
         qCount_ = kept;
-        if (qCount_ >= kMaxJobs) { return false; }
-        // Insert at the head so the user is not waiting behind refreshes.
-        qHead_ = (qHead_ + kMaxJobs - 1) % kMaxJobs;
-        FetchJob& slot = queue_[qHead_];
-        slot.kind   = JobKind::Search;
-        slot.stock  = 0;
-        slot.range  = 0;
-        slot.symbol = query;
-        slot.url    = url;
-        slot.notify = notify;
-        ++qCount_;
     }
-    qCv_.notify_one();
-    return true;
+    return Push(job, true);   // the user is typing: do not wait behind refreshes
+}
+
+bool Fetcher::EnqueueFx(const std::wstring& from, const std::wstring& to) {
+    assert(thread_ != nullptr);
+    if (from.empty() || to.empty() || from == to) { return false; }
+    FetchJob job;
+    job.kind   = JobKind::Fx;
+    job.symbol = from + to + L"=X";
+    job.aux    = from + L"|" + to;
+    job.url    = BuildUrl(job.symbol, kSummarySpec);
+    return Push(job, false);
 }
 
 std::wstring Fetcher::BuildUrl(const std::wstring& symbol, const RangeSpec& spec) const {
@@ -207,6 +220,10 @@ std::wstring Fetcher::BuildUrl(const std::wstring& symbol, const RangeSpec& spec
     ReplaceAll(url, L"{symbol}",   UrlEncode(symbol));
     ReplaceAll(url, L"{range}",    spec.range);
     ReplaceAll(url, L"{interval}", spec.interval);
+    // Older config files predate dividend events; ask for them anyway.
+    if (url.find(L"events=") == std::wstring::npos && url.find(L'?') != std::wstring::npos) {
+        url += L"&events=div";
+    }
     return url;
 }
 
@@ -254,9 +271,8 @@ void Fetcher::Process(const FetchJob& job) {
             insetValid_[job.stock] = true;
             msg = WM_APP_INSET_READY;
             break;
-        case JobKind::Quote:
-        case JobKind::Search:
-            assert(false);  // handled by ProcessQuote / ProcessSearch
+        default:
+            assert(false);  // other kinds have their own Process* functions
             break;
         }
     }
@@ -344,15 +360,63 @@ void Fetcher::ProcessSearch(const FetchJob& job) {
     (void)posted;
 }
 
-bool Fetcher::CopySearch(std::array<SearchHit, kMaxSearchHits>& out, size_t& count,
-                         std::wstring& query, std::wstring& err) {
-    if (!search_) { return false; }
-    std::lock_guard<std::mutex> lock(dataMutex_);
-    out   = *search_;
-    count = searchCount_;
-    query = searchQuery_;
-    err   = searchError_;
-    return true;
+void Fetcher::ProcessFx(const FetchJob& job) {
+    assert(job.kind == JobKind::Fx && !job.url.empty());
+    const size_t bar = job.aux.find(L'|');
+    assert(bar != std::wstring::npos);
+    if (bar == std::wstring::npos) { return; }
+    FxRate r;
+    r.from = job.aux.substr(0, bar);
+    r.to   = job.aux.substr(bar + 1);
+    const bool ok = Fetch(job.url, *scratch_);
+    if (ok && scratch_->meta.price > 0.0) {
+        r.rate  = scratch_->meta.price;
+        r.valid = true;
+    } else if (ok && scratch_->series.count > 0) {
+        r.rate  = scratch_->series.pts[scratch_->series.count - 1].close;
+        r.valid = r.rate > 0.0;
+    }
+    {
+        std::lock_guard<std::mutex> lock(dataMutex_);
+        // Replace an existing entry for this pair, else take a free/oldest slot.
+        size_t slot = kMaxFx;
+        for (size_t i = 0; i < kMaxFx; ++i) {
+            if (fx_[i].from == r.from && fx_[i].to == r.to) { slot = i; break; }
+        }
+        if (slot == kMaxFx) {
+            for (size_t i = 0; i < kMaxFx; ++i) {
+                if (fx_[i].from.empty()) { slot = i; break; }
+            }
+        }
+        if (slot == kMaxFx) { slot = 0; }
+        fx_[slot] = r;
+    }
+    const BOOL posted = PostMessageW(notify_, WM_APP_FX_READY, 0, 0);
+    assert(posted);
+    (void)posted;
+}
+
+void Fetcher::ProcessNews(const FetchJob& job) {
+    assert(job.kind == JobKind::News && !job.url.empty() && job.stock < kMaxStocks);
+    std::wstring err;
+    size_t       count = 0;
+    HttpResult   res;
+    bool ok = http_.Get(job.url, buf_.get(), kHttpBufSize, res, err);
+    {
+        std::lock_guard<std::mutex> lock(dataMutex_);
+        NewsSlot& slot = (*news_)[job.stock];
+        if (ok) {
+            ok = ParseNewsJson(buf_.get(), res.length, slot.items, count, err);
+            if (!ok && res.status != 200) { err = L"HTTP " + std::to_wstring(res.status) + L": " + err; }
+        }
+        slot.count  = ok ? count : 0;
+        slot.symbol = job.symbol;
+        slot.error  = ok ? L"" : err;
+        slot.valid  = true;
+    }
+    const BOOL posted = PostMessageW(notify_, WM_APP_NEWS_READY, static_cast<WPARAM>(job.stock), 0);
+    assert(posted);
+    (void)posted;
 }
 
 bool Fetcher::CopySummary(size_t stock, QuoteData& out) {
@@ -387,6 +451,37 @@ bool Fetcher::CopyQuotes(std::array<QuoteStats, kMaxStocks>& out, size_t& count,
     out   = *quotes_;
     count = quoteCount_;
     err   = quoteError_;
+    return true;
+}
+
+bool Fetcher::CopySearch(std::array<SearchHit, kMaxSearchHits>& out, size_t& count,
+                         std::wstring& query, std::wstring& err) {
+    if (!search_) { return false; }
+    std::lock_guard<std::mutex> lock(dataMutex_);
+    out   = *search_;
+    count = searchCount_;
+    query = searchQuery_;
+    err   = searchError_;
+    return true;
+}
+
+bool Fetcher::CopyFx(std::array<FxRate, kMaxFx>& out) {
+    std::lock_guard<std::mutex> lock(dataMutex_);
+    out = fx_;
+    return true;
+}
+
+bool Fetcher::CopyNews(size_t stock, std::array<NewsItem, kMaxNews>& out, size_t& count,
+                       std::wstring& symbol, std::wstring& err) {
+    assert(stock < kMaxStocks);
+    if (stock >= kMaxStocks || !news_) { return false; }
+    std::lock_guard<std::mutex> lock(dataMutex_);
+    const NewsSlot& slot = (*news_)[stock];
+    if (!slot.valid) { return false; }
+    out    = slot.items;
+    count  = slot.count;
+    symbol = slot.symbol;
+    err    = slot.error;
     return true;
 }
 

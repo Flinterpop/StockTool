@@ -1,5 +1,7 @@
 #include "config.h"
 
+#include <shlobj.h>
+
 #include <algorithm>
 #include <cassert>
 #include <cwchar>
@@ -13,13 +15,16 @@ namespace {
 
 constexpr wchar_t kDefaultUrlTemplate[] =
     L"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-    L"?range={range}&interval={interval}&includePrePost=false";
+    L"?range={range}&interval={interval}&includePrePost=false&events=div";
 
 constexpr wchar_t kDefaultQuoteUrlTemplate[] =
     L"https://query2.finance.yahoo.com/v7/finance/quote?symbols={symbols}&crumb={crumb}";
 
 constexpr wchar_t kDefaultSearchUrlTemplate[] =
     L"https://query2.finance.yahoo.com/v1/finance/search?q={query}&quotesCount=12&newsCount=0&listsCount=0";
+
+constexpr wchar_t kDefaultNewsUrlTemplate[] =
+    L"https://query2.finance.yahoo.com/v1/finance/search?q={symbol}&quotesCount=0&newsCount=8&listsCount=0";
 
 constexpr char kDefaultConfigText[] =
     "; StockTool configuration.\r\n"
@@ -29,19 +34,24 @@ constexpr char kDefaultConfigText[] =
     "[settings]\r\n"
     "refresh_seconds=60\r\n"
     "default_range=1Y\r\n"
-    "; Trend inset in the chart corner: 1Y or 5Y\r\n"
+    "; Trend inset in the chart corner: 5Y or 1Y\r\n"
     "inset_range=5Y\r\n"
     "; system | light | dark\r\n"
     "theme=system\r\n"
     "start_minimized=0\r\n"
     "minimize_to_tray=0\r\n"
+    "; Portfolio totals are converted into this currency.\r\n"
+    "portfolio_currency=CAD\r\n"
     "url_template=https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-    "?range={range}&interval={interval}&includePrePost=false\r\n"
+    "?range={range}&interval={interval}&includePrePost=false&events=div\r\n"
     "; Fundamentals (market cap, P/E, yield). Leave empty to disable.\r\n"
     "quote_url_template=https://query2.finance.yahoo.com/v7/finance/quote?symbols={symbols}&crumb={crumb}\r\n"
     "; Symbol search in the Add dialog. Leave empty to disable.\r\n"
     "search_url_template=https://query2.finance.yahoo.com/v1/finance/search?q={query}&quotesCount=12&newsCount=0&listsCount=0\r\n"
+    "; Headlines pane. Leave empty to disable.\r\n"
+    "news_url_template=https://query2.finance.yahoo.com/v1/finance/search?q={symbol}&quotesCount=0&newsCount=8&listsCount=0\r\n"
     "\r\n"
+    "; Default watch list. Extra lists live in [stocks.<name>] sections.\r\n"
     "[stocks]\r\n"
     "RY.TO=Royal Bank of Canada\r\n"
     "DOL.TO=Dollarama Inc.\r\n"
@@ -53,14 +63,19 @@ constexpr char kDefaultConfigText[] =
     "[holdings]\r\n"
     "\r\n"
     "; symbol=above,below   (written by Ticker > Alerts...; 0 = unset)\r\n"
-    "[alerts]\r\n";
+    "[alerts]\r\n"
+    "\r\n"
+    "; symbol=CAD   (currency override when the provider labels a listing oddly)\r\n"
+    "[currency]\r\n";
 
 constexpr size_t kSectionBufChars = 8192;
 constexpr wchar_t kSettings[] = L"settings";
 constexpr wchar_t kStocks[]   = L"stocks";
 constexpr wchar_t kHoldings[] = L"holdings";
 constexpr wchar_t kAlerts[]   = L"alerts";
+constexpr wchar_t kCurrency[] = L"currency";
 constexpr wchar_t kState[]    = L"state";
+constexpr wchar_t kListPrefix[] = L"stocks.";
 
 std::wstring Trim(const std::wstring& s) {
     size_t b = 0;
@@ -89,6 +104,11 @@ bool WriteString(const std::wstring& path, const wchar_t* section, const wchar_t
         return false;
     }
     return true;
+}
+
+// INI section holding a watch list: [stocks] for the default, [stocks.Name] otherwise.
+std::wstring ListSection(const std::wstring& listName) {
+    return listName.empty() ? std::wstring(kStocks) : std::wstring(kListPrefix) + listName;
 }
 
 size_t RangeIndexFromLabel(const std::wstring& label, size_t fallback) {
@@ -127,12 +147,13 @@ std::wstring FormatPair(double a, double b) {
     return buf.data();
 }
 
-bool LoadStocks(const std::wstring& path, Config& out, std::wstring& err) {
+// Reads the "key=value" entries of `section` into `out`. False = too large.
+bool ReadStockSection(const std::wstring& path, const std::wstring& section, Config& out, std::wstring& err) {
     std::array<wchar_t, kSectionBufChars> buf{};
-    const DWORD n = GetPrivateProfileSectionW(kStocks, buf.data(),
+    const DWORD n = GetPrivateProfileSectionW(section.c_str(), buf.data(),
                                               static_cast<DWORD>(buf.size()), path.c_str());
     if (n >= buf.size() - 2) {
-        err = L"[stocks] section is too large";
+        err = L"[" + section + L"] section is too large";
         return false;
     }
     out.stockCount = 0;
@@ -148,14 +169,50 @@ bool LoadStocks(const std::wstring& path, Config& out, std::wstring& err) {
         if (out.stockCount >= kMaxStocks) { break; }  // silently cap
         ParsePair(ReadString(path, kHoldings, e.symbol.c_str(), L""), e.holding.qty, e.holding.cost);
         ParsePair(ReadString(path, kAlerts, e.symbol.c_str(), L""), e.alert.above, e.alert.below);
+        e.currency = ReadString(path, kCurrency, e.symbol.c_str(), L"");
+        std::wstring ignored;
+        if (!NormalizeCurrency(e.currency, ignored)) { e.currency.clear(); }
         out.stocks[out.stockCount] = e;
         ++out.stockCount;
     }
-    if (out.stockCount == 0) {
-        err = L"No stocks listed under [stocks] in " + path;
-        return false;
-    }
     assert(out.stockCount <= kMaxStocks);
+    return true;
+}
+
+// Fills cfg.lists from the section names: "" (default) first, then every
+// [stocks.<name>] in file order.
+void ReadListNames(const std::wstring& path, Config& cfg) {
+    cfg.listCount = 1;
+    cfg.lists[0].clear();
+    std::array<wchar_t, kSectionBufChars> buf{};
+    const DWORD n = GetPrivateProfileSectionNamesW(buf.data(), static_cast<DWORD>(buf.size()), path.c_str());
+    size_t pos = 0;
+    const size_t prefixLen = wcslen(kListPrefix);
+    for (size_t guard = 0; guard < kSectionBufChars && pos < n && cfg.listCount < kMaxLists; ++guard) {
+        const wchar_t* name = buf.data() + pos;
+        const size_t len = wcsnlen_s(name, buf.size() - pos);
+        if (len == 0) { break; }
+        pos += len + 1;
+        if (_wcsnicmp(name, kListPrefix, prefixLen) != 0 || len <= prefixLen) { continue; }
+        cfg.lists[cfg.listCount] = std::wstring(name + prefixLen);
+        ++cfg.listCount;
+    }
+    assert(cfg.listCount >= 1 && cfg.listCount <= kMaxLists);
+}
+
+bool ListExists(const Config& cfg, const std::wstring& name) {
+    for (size_t i = 0; i < cfg.listCount; ++i) {
+        if (_wcsicmp(cfg.lists[i].c_str(), name.c_str()) == 0) { return true; }
+    }
+    return false;
+}
+
+bool DirectoryWritable(const std::wstring& dir) {
+    const std::wstring probe = dir + L"stocktool.probe";
+    HANDLE h = CreateFileW(probe.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
+    if (h == INVALID_HANDLE_VALUE) { return false; }
+    CloseHandle(h);
     return true;
 }
 
@@ -165,11 +222,21 @@ std::wstring DefaultConfigPath() {
     std::array<wchar_t, MAX_PATH> exe{};
     const DWORD n = GetModuleFileNameW(nullptr, exe.data(), static_cast<DWORD>(exe.size()));
     assert(n > 0 && n < exe.size());
-    std::wstring path(exe.data(), n);
-    const size_t slash = path.find_last_of(L"\\/");
-    if (slash != std::wstring::npos) { path.resize(slash + 1); }
-    path += L"stocktool.cfg";
-    return path;
+    std::wstring dir(exe.data(), n);
+    const size_t slash = dir.find_last_of(L"\\/");
+    if (slash != std::wstring::npos) { dir.resize(slash + 1); }
+    const std::wstring beside = dir + L"stocktool.cfg";
+    if (GetFileAttributesW(beside.c_str()) != INVALID_FILE_ATTRIBUTES || DirectoryWritable(dir)) {
+        return beside;   // portable / development layout
+    }
+    // Installed under Program Files: keep the config in the user's profile.
+    std::array<wchar_t, MAX_PATH> appdata{};
+    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, SHGFP_TYPE_CURRENT, appdata.data()))) {
+        return beside;   // no profile folder: fall back and let the caller report the error
+    }
+    const std::wstring folder = std::wstring(appdata.data()) + L"\\StockTool";
+    CreateDirectoryW(folder.c_str(), nullptr);   // may already exist
+    return folder + L"\\stocktool.cfg";
 }
 
 bool WriteDefaultConfig(const std::wstring& path, std::wstring& err) {
@@ -191,7 +258,7 @@ bool WriteDefaultConfig(const std::wstring& path, std::wstring& err) {
     return true;
 }
 
-bool LoadConfig(const std::wstring& path, Config& out, std::wstring& err) {
+bool LoadConfig(const std::wstring& path, const std::wstring& listName, Config& out, std::wstring& err) {
     assert(!path.empty());
     out = Config{};
     out.path = path;
@@ -212,6 +279,11 @@ bool LoadConfig(const std::wstring& path, Config& out, std::wstring& err) {
     else                                            { out.theme = ThemeMode::System; }
     out.startMinimized = ReadBool(path, kSettings, L"start_minimized", false);
     out.minimizeToTray = ReadBool(path, kSettings, L"minimize_to_tray", false);
+    out.portfolioCurrency = ReadString(path, kSettings, L"portfolio_currency", L"CAD");
+    std::wstring ignored;
+    if (!NormalizeCurrency(out.portfolioCurrency, ignored) || out.portfolioCurrency.empty()) {
+        out.portfolioCurrency = L"CAD";
+    }
 
     out.urlTemplate = ReadString(path, kSettings, L"url_template", kDefaultUrlTemplate);
     if (out.urlTemplate.find(L"{symbol}") == std::wstring::npos) {
@@ -228,8 +300,22 @@ bool LoadConfig(const std::wstring& path, Config& out, std::wstring& err) {
         err = L"search_url_template must contain {query} (or be empty)";
         return false;
     }
+    out.newsUrlTemplate = ReadString(path, kSettings, L"news_url_template", kDefaultNewsUrlTemplate);
+    if (!out.newsUrlTemplate.empty() && out.newsUrlTemplate.find(L"{symbol}") == std::wstring::npos) {
+        err = L"news_url_template must contain {symbol} (or be empty)";
+        return false;
+    }
 
-    if (!LoadStocks(path, out, err)) { return false; }
+    ReadListNames(path, out);
+    out.listName = ListExists(out, listName) ? listName : L"";
+    if (!ReadStockSection(path, ListSection(out.listName), out, err)) { return false; }
+    if (out.stockCount == 0) {
+        if (out.listName.empty()) {
+            err = L"No stocks listed under [stocks] in " + path;
+            return false;
+        }
+        // An empty named list is allowed; the app shows an empty watch list.
+    }
     assert(out.defaultRange < kRanges.size());
     return true;
 }
@@ -254,12 +340,14 @@ void LoadViewState(const std::wstring& path, ViewState& out) {
     out.bollinger = ReadBool(path, kState, L"bollinger", false);
     out.rsi       = ReadBool(path, kState, L"rsi", false);
     out.inset     = ReadBool(path, kState, L"inset", true);
+    out.news      = ReadBool(path, kState, L"news", false);
     double ix = 0.0;
     double iy = 0.0;
     ParsePair(ReadString(path, kState, L"inset_pos", L""), ix, iy);
     out.insetX    = static_cast<float>(min(max(ix, 0.0), 1.0));
     out.insetY    = static_cast<float>(min(max(iy, 0.0), 1.0));
     out.selected  = ReadString(path, kState, L"selected", L"");
+    out.list      = ReadString(path, kState, L"list", L"");
 }
 
 bool SaveViewState(const std::wstring& path, const ViewState& s, std::wstring& err) {
@@ -279,8 +367,10 @@ bool SaveViewState(const std::wstring& path, const ViewState& s, std::wstring& e
         { L"bollinger", s.bollinger ? L"1" : L"0" },
         { L"rsi",       s.rsi ? L"1" : L"0" },
         { L"inset",     s.inset ? L"1" : L"0" },
+        { L"news",      s.news ? L"1" : L"0" },
         { L"inset_pos", FormatPair(s.insetX, s.insetY) },
         { L"selected",  s.selected },
+        { L"list",      s.list },
     };
     for (const auto& it : items) {
         if (!WriteString(path, kState, it.key, it.value.c_str(), err)) { return false; }
@@ -327,35 +417,129 @@ std::wstring NormalizeName(const std::wstring& name, const std::wstring& fallbac
     return out.empty() ? fallback : out;
 }
 
-bool WriteStockEntry(const std::wstring& path, const StockEntry& entry, std::wstring& err) {
-    assert(!path.empty());
+bool NormalizeCurrency(std::wstring& code, std::wstring& err) {
+    code = Trim(code);
+    if (code.empty()) { return true; }
+    if (code.size() != 3) {
+        err = L"Currency must be a 3-letter code such as CAD or USD";
+        return false;
+    }
+    for (wchar_t& c : code) {
+        c = static_cast<wchar_t>(std::towupper(c));
+        if (c < L'A' || c > L'Z') {
+            err = L"Currency must be a 3-letter code such as CAD or USD";
+            return false;
+        }
+    }
+    return true;
+}
+
+bool NormalizeListName(std::wstring& name, std::wstring& err) {
+    constexpr size_t kMaxListName = 24;
+    name = Trim(name);
+    if (name.empty()) {
+        err = L"Enter a list name";
+        return false;
+    }
+    if (name.size() > kMaxListName) {
+        err = L"List names are at most 24 characters";
+        return false;
+    }
+    for (wchar_t c : name) {
+        const bool ok = std::iswalnum(c) != 0 || c == L' ' || c == L'-' || c == L'_';
+        if (!ok) {
+            err = L"List names may only contain letters, digits, spaces, - and _";
+            return false;
+        }
+    }
+    return true;
+}
+
+bool WriteStockEntry(const Config& cfg, const StockEntry& entry, std::wstring& err) {
+    assert(!cfg.path.empty());
     assert(!entry.symbol.empty());
-    if (!WriteString(path, kStocks, entry.symbol.c_str(), entry.name.c_str(), err)) { return false; }
-    if (!WriteHolding(path, entry.symbol, entry.holding, err)) { return false; }
-    return WriteAlert(path, entry.symbol, entry.alert, err);
+    const std::wstring section = ListSection(cfg.listName);
+    if (!WriteString(cfg.path, section.c_str(), entry.symbol.c_str(), entry.name.c_str(), err)) { return false; }
+    // Holding/alert/currency are shared across lists by symbol: only set
+    // values are written here, so adding a symbol to a second list can never
+    // wipe what the first list already stored. Clearing goes through
+    // WriteHolding/WriteAlert/WriteCurrency directly.
+    const bool holdingSet = entry.holding.qty != 0.0 || entry.holding.cost != 0.0;
+    const bool alertSet   = entry.alert.above != 0.0 || entry.alert.below != 0.0;
+    if (holdingSet && !WriteHolding(cfg.path, entry.symbol, entry.holding, err)) { return false; }
+    if (alertSet && !WriteAlert(cfg.path, entry.symbol, entry.alert, err)) { return false; }
+    if (!entry.currency.empty() && !WriteCurrency(cfg.path, entry.symbol, entry.currency, err)) { return false; }
+    return true;
 }
 
-bool DeleteStockEntry(const std::wstring& path, const std::wstring& symbol, std::wstring& err) {
-    assert(!path.empty());
+bool DeleteStockEntry(const Config& cfg, const std::wstring& symbol, std::wstring& err) {
+    assert(!cfg.path.empty());
     assert(!symbol.empty());
-    if (!WriteString(path, kStocks, symbol.c_str(), nullptr, err)) { return false; }
-    if (!WriteString(path, kHoldings, symbol.c_str(), nullptr, err)) { return false; }
-    return WriteString(path, kAlerts, symbol.c_str(), nullptr, err);
+    const std::wstring section = ListSection(cfg.listName);
+    if (!WriteString(cfg.path, section.c_str(), symbol.c_str(), nullptr, err)) { return false; }
+    // Holdings/alerts/currency are shared across lists: keep them while the
+    // symbol is still listed somewhere else.
+    for (size_t i = 0; i < cfg.listCount; ++i) {
+        if (_wcsicmp(cfg.lists[i].c_str(), cfg.listName.c_str()) == 0) { continue; }
+        const std::wstring probe = ReadString(cfg.path, ListSection(cfg.lists[i]).c_str(), symbol.c_str(), L"\x01");
+        if (probe != L"\x01") { return true; }   // still present in another list
+    }
+    if (!WriteString(cfg.path, kHoldings, symbol.c_str(), nullptr, err)) { return false; }
+    if (!WriteString(cfg.path, kAlerts, symbol.c_str(), nullptr, err)) { return false; }
+    return WriteString(cfg.path, kCurrency, symbol.c_str(), nullptr, err);
 }
 
-bool WriteStockOrder(const std::wstring& path, const Config& cfg, std::wstring& err) {
-    assert(cfg.stockCount > 0 && cfg.stockCount <= kMaxStocks);
+bool WriteStockOrder(const Config& cfg, std::wstring& err) {
+    assert(cfg.stockCount <= kMaxStocks);
     std::wstring block;
     for (size_t i = 0; i < cfg.stockCount; ++i) {
         block += cfg.stocks[i].symbol + L"=" + cfg.stocks[i].name;
         block.push_back(L'\0');
     }
     block.push_back(L'\0');
-    if (!WritePrivateProfileSectionW(kStocks, block.c_str(), path.c_str())) {
-        err = L"Could not rewrite [stocks] in " + path;
+    const std::wstring section = ListSection(cfg.listName);
+    if (!WritePrivateProfileSectionW(section.c_str(), block.c_str(), cfg.path.c_str())) {
+        err = L"Could not rewrite [" + section + L"] in " + cfg.path;
         return false;
     }
     return true;
+}
+
+bool CreateList(const std::wstring& path, const std::wstring& name, std::wstring& err) {
+    assert(!name.empty());
+    // A section with a placeholder comment line is enough to make it exist.
+    const std::wstring section = ListSection(name);
+    const wchar_t block[] = L"; tickers for this list\0";
+    if (!WritePrivateProfileSectionW(section.c_str(), block, path.c_str())) {
+        err = L"Could not create list " + name;
+        return false;
+    }
+    return true;
+}
+
+bool RenameList(const std::wstring& path, const std::wstring& from, const std::wstring& to, std::wstring& err) {
+    assert(!from.empty() && !to.empty());
+    std::array<wchar_t, kSectionBufChars> buf{};
+    const std::wstring oldSection = ListSection(from);
+    const DWORD n = GetPrivateProfileSectionW(oldSection.c_str(), buf.data(),
+                                              static_cast<DWORD>(buf.size()), path.c_str());
+    if (n >= buf.size() - 2) {
+        err = L"List " + from + L" is too large to rename";
+        return false;
+    }
+    buf[n] = L'\0';
+    buf[n + 1] = L'\0';
+    const std::wstring newSection = ListSection(to);
+    if (!WritePrivateProfileSectionW(newSection.c_str(), buf.data(), path.c_str())) {
+        err = L"Could not create list " + to;
+        return false;
+    }
+    return WriteString(path, oldSection.c_str(), nullptr, nullptr, err);   // deletes the old section
+}
+
+bool DeleteList(const std::wstring& path, const std::wstring& name, std::wstring& err) {
+    assert(!name.empty());   // the default list cannot be deleted
+    return WriteString(path, ListSection(name).c_str(), nullptr, nullptr, err);
 }
 
 bool WriteSetting(const std::wstring& path, const wchar_t* key, const std::wstring& value, std::wstring& err) {
@@ -375,6 +559,11 @@ bool WriteAlert(const std::wstring& path, const std::wstring& symbol, const Aler
     const bool unset = (a.above == 0.0 && a.below == 0.0);
     return WriteString(path, kAlerts, symbol.c_str(),
                        unset ? nullptr : FormatPair(a.above, a.below).c_str(), err);
+}
+
+bool WriteCurrency(const std::wstring& path, const std::wstring& symbol, const std::wstring& code, std::wstring& err) {
+    assert(!symbol.empty());
+    return WriteString(path, kCurrency, symbol.c_str(), code.empty() ? nullptr : code.c_str(), err);
 }
 
 } // namespace st
