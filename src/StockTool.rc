@@ -41,6 +41,7 @@ BEGIN
     POPUP "&Ticker"
     BEGIN
         MENUITEM "&Add...\tCtrl+N",        IDM_ADD
+        MENUITEM "&Edit...\tF2",           IDM_EDIT
         MENUITEM "&Remove",                IDM_REMOVE
         MENUITEM "Move &up\tCtrl+Up",      IDM_MOVEUP
         MENUITEM "Move &down\tCtrl+Down",  IDM_MOVEDOWN
@@ -57,7 +58,7 @@ END
 // "Add ticker" dialog. Sizes are dialog units, so it scales with DPI.
 IDD_ADDTICKER DIALOGEX 0, 0, 300, 196
 STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
-CAPTION "Add ticker"
+CAPTION "Add tickers"
 FONT 9, "Segoe UI", 400, 0, 1
 BEGIN
     LTEXT           "Search by company name or symbol:", -1, 7, 7, 286, 8
@@ -70,7 +71,7 @@ BEGIN
     EDITTEXT        IDC_NAME, 7, 147, 286, 13, ES_AUTOHSCROLL
     LTEXT           "", IDC_HINT, 7, 166, 286, 8
     DEFPUSHBUTTON   "Add", IDOK, 189, 177, 50, 14
-    PUSHBUTTON      "Cancel", IDCANCEL, 243, 177, 50, 14
+    PUSHBUTTON      "Close", IDCANCEL, 243, 177, 50, 14
 END
 
 IDD_HOLDING DIALOGEX 0, 0, 220, 96

@@ -68,17 +68,25 @@ std::wstring AmountText(double v) {
 constexpr UINT_PTR kSearchTimer   = 1;
 constexpr UINT     kSearchDelayMs = 350;   // typing debounce
 
+constexpr size_t kNoEdit = static_cast<size_t>(-1);
+
 struct AddState {
-    const Config* cfg     = nullptr;
-    Fetcher*      fetcher = nullptr;
-    StockEntry    result;
+    const Config*      cfg       = nullptr;
+    Fetcher*           fetcher   = nullptr;
+    const AddTickerFn* onAdd     = nullptr;   // add mode
+    size_t             editIndex = kNoEdit;   // edit mode: the entry being changed
+    StockEntry         result;
+    size_t             added     = 0;
     std::array<SearchHit, kMaxSearchHits> hits{};
-    size_t        hitCount = 0;
+    size_t             hitCount  = 0;
+    bool Editing() const { return editIndex != kNoEdit; }
 };
 
 AddState* StateOf(HWND dlg) {
     return reinterpret_cast<AddState*>(GetWindowLongPtrW(dlg, DWLP_USER));
 }
+
+bool ReadAddFields(HWND dlg, AddState& st);
 
 void StartSearch(HWND dlg, AddState& st) {
     assert(st.fetcher != nullptr);
@@ -126,6 +134,34 @@ void UseSearchResult(HWND dlg, AddState& st, size_t index) {
     SetDlgItemTextW(dlg, IDC_HINT, L"");
 }
 
+// Add mode: validates the fields, hands the entry to the app and, on
+// success, clears the fields so the next ticker can be entered (the dialog
+// stays open). Edit mode: validates and closes with IDOK.
+void AddCurrent(HWND dlg, AddState& st) {
+    if (!ReadAddFields(dlg, st)) { return; }
+    if (st.Editing()) {
+        EndDialog(dlg, IDOK);
+        return;
+    }
+    assert(st.onAdd != nullptr);
+    std::wstring err;
+    if (!(*st.onAdd)(st.result, err)) {
+        SetDlgItemTextW(dlg, IDC_HINT, err.c_str());
+        return;
+    }
+    ++st.added;
+    SetDlgItemTextW(dlg, IDC_SYMBOL, L"");
+    SetDlgItemTextW(dlg, IDC_NAME, L"");
+    SetDlgItemTextW(dlg, IDC_HINT, (L"Added " + st.result.symbol + L". Add another, or Close.").c_str());
+    const HWND query = GetDlgItem(dlg, IDC_QUERY);
+    if (IsWindowEnabled(query)) {
+        SetFocus(query);
+        SendMessageW(query, EM_SETSEL, 0, -1);
+    } else {
+        SetFocus(GetDlgItem(dlg, IDC_SYMBOL));
+    }
+}
+
 bool ReadAddFields(HWND dlg, AddState& st) {
     assert(st.cfg != nullptr);
     std::wstring symbol = FieldText(dlg, IDC_SYMBOL);
@@ -135,12 +171,13 @@ bool ReadAddFields(HWND dlg, AddState& st) {
         return false;
     }
     for (size_t i = 0; i < st.cfg->stockCount; ++i) {
+        if (i == st.editIndex) { continue; }   // the entry being edited may keep its symbol
         if (SameSymbol(st.cfg->stocks[i].symbol, symbol)) {
             SetDlgItemTextW(dlg, IDC_HINT, (symbol + L" is already in the list").c_str());
             return false;
         }
     }
-    st.result        = StockEntry{};
+    if (!st.Editing()) { st.result = StockEntry{}; }   // edit mode keeps holding/alert
     st.result.symbol = symbol;
     st.result.name   = NormalizeName(FieldText(dlg, IDC_NAME), symbol);
     assert(!st.result.symbol.empty() && !st.result.name.empty());
@@ -158,6 +195,14 @@ INT_PTR CALLBACK AddProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
         SendDlgItemMessageW(dlg, IDC_NAME, EM_LIMITTEXT, 63, 0);
         const int tab = 60;  // dialog units: symbol column, then name
         SendDlgItemMessageW(dlg, IDC_RESULTS, LB_SETTABSTOPS, 1, reinterpret_cast<LPARAM>(&tab));
+        if (st->Editing()) {
+            SetWindowTextW(dlg, L"Edit ticker");
+            SetDlgItemTextW(dlg, IDOK, L"Save");
+            SetDlgItemTextW(dlg, IDCANCEL, L"Cancel");
+            SetDlgItemTextW(dlg, IDC_SYMBOL, st->result.symbol.c_str());
+            SetDlgItemTextW(dlg, IDC_NAME, st->result.name.c_str());
+            SetDlgItemTextW(dlg, IDC_HINT, L"Change the symbol or name, or search for the right listing.");
+        }
         if (!st->fetcher->SearchEnabled()) {
             EnableWindow(GetDlgItem(dlg, IDC_QUERY), FALSE);
             EnableWindow(GetDlgItem(dlg, IDC_SEARCH), FALSE);
@@ -197,19 +242,19 @@ INT_PTR CALLBACK AddProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
         if (id == IDC_RESULTS && (code == LBN_SELCHANGE || code == LBN_DBLCLK)) {
             const LRESULT sel = SendDlgItemMessageW(dlg, IDC_RESULTS, LB_GETCURSEL, 0, 0);
             if (sel != LB_ERR) { UseSearchResult(dlg, *st, static_cast<size_t>(sel)); }
-            if (code == LBN_DBLCLK && sel != LB_ERR && ReadAddFields(dlg, *st)) { EndDialog(dlg, IDOK); }
+            if (code == LBN_DBLCLK && sel != LB_ERR) { AddCurrent(dlg, *st); }
             return TRUE;
         }
         if (id == IDOK) {
-            // Enter in the search box searches; elsewhere it adds.
+            // Enter in the search box searches; elsewhere it adds (and stays open).
             if (GetFocus() == GetDlgItem(dlg, IDC_QUERY)) {
                 StartSearch(dlg, *st);
                 return TRUE;
             }
-            if (ReadAddFields(dlg, *st)) { EndDialog(dlg, IDOK); }
+            AddCurrent(dlg, *st);
             return TRUE;
         }
-        if (id == IDCANCEL) {
+        if (id == IDCANCEL) {   // the Close button, Esc, or the title-bar X
             EndDialog(dlg, IDCANCEL);
             return TRUE;
         }
@@ -326,16 +371,33 @@ INT_PTR CALLBACK AlertsProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
 
 } // namespace
 
-bool RunAddTickerDialog(HINSTANCE inst, HWND owner, const Config& cfg, Fetcher& fetcher, StockEntry& out) {
+size_t RunAddTickerDialog(HINSTANCE inst, HWND owner, const Config& cfg, Fetcher& fetcher, const AddTickerFn& onAdd) {
     assert(inst != nullptr && owner != nullptr);
+    assert(static_cast<bool>(onAdd));
     AddState st;
     st.cfg     = &cfg;
     st.fetcher = &fetcher;
+    st.onAdd   = &onAdd;
+    const INT_PTR rc = DialogBoxParamW(inst, MAKEINTRESOURCEW(IDD_ADDTICKER), owner, &AddProc,
+                                       reinterpret_cast<LPARAM>(&st));
+    (void)rc;  // the dialog only ever closes via Close/Esc; adds happened through onAdd
+    return st.added;
+}
+
+bool RunEditTickerDialog(HINSTANCE inst, HWND owner, const Config& cfg, Fetcher& fetcher,
+                         size_t index, StockEntry& entry) {
+    assert(inst != nullptr && owner != nullptr);
+    assert(index < cfg.stockCount);
+    AddState st;
+    st.cfg       = &cfg;
+    st.fetcher   = &fetcher;
+    st.editIndex = index;
+    st.result    = entry;
     const INT_PTR rc = DialogBoxParamW(inst, MAKEINTRESOURCEW(IDD_ADDTICKER), owner, &AddProc,
                                        reinterpret_cast<LPARAM>(&st));
     if (rc != IDOK) { return false; }
-    out = st.result;
-    assert(!out.symbol.empty());
+    entry = st.result;
+    assert(!entry.symbol.empty());
     return true;
 }
 

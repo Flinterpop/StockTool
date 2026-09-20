@@ -48,6 +48,7 @@
 #define IDM_MOVEDOWN      1033
 #define IDM_HOLDING       1034
 #define IDM_ALERTS        1035
+#define IDM_EDIT          1036
 #define IDM_ABOUT         1040
 #define IDM_TRAY_SHOW     1050
 #define IDM_TRAY_EXIT     1051

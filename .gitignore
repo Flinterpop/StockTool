@@ -12,6 +12,8 @@
 !/src/*.h
 !/src/*.rc
 !/src/*.ico
+!/cmake/
+!/cmake/*.cmake
 !/tools/
 !/tools/*.py
 !/tests/

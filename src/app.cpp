@@ -159,10 +159,11 @@ bool App::Create(HINSTANCE hInst, int nCmdShow, std::wstring& err) {
     const ACCEL accel[] = {
         { FVIRTKEY, VK_F5, static_cast<WORD>(IDM_REFRESH) },
         { FVIRTKEY | FCONTROL, 'N', static_cast<WORD>(IDM_ADD) },
+        { FVIRTKEY, VK_F2, static_cast<WORD>(IDM_EDIT) },
         { FVIRTKEY | FCONTROL, VK_UP, static_cast<WORD>(IDM_MOVEUP) },
         { FVIRTKEY | FCONTROL, VK_DOWN, static_cast<WORD>(IDM_MOVEDOWN) },
     };
-    hAccel_ = CreateAcceleratorTableW(const_cast<ACCEL*>(accel), 4);
+    hAccel_ = CreateAcceleratorTableW(const_cast<ACCEL*>(accel), 5);
     assert(hAccel_ != nullptr);
 
     ApplyStartupState(nCmdShow);
@@ -695,13 +696,19 @@ void App::OnAddTicker() {
         SetStatus(L"Limit of " + std::to_wstring(kMaxStocks) + L" tickers reached");
         return;
     }
-    StockEntry entry;
-    if (!RunAddTickerDialog(hInst_, hwnd_, cfg_, fetcher_, entry)) { return; }
-    std::wstring err;
-    if (!WriteStockEntry(cfg_.path, entry, err)) {
-        SetStatus(err);
-        return;
+    // The dialog stays open until closed; each Add calls back into AddTicker.
+    const size_t added = RunAddTickerDialog(hInst_, hwnd_, cfg_, fetcher_,
+        [this](const StockEntry& entry, std::wstring& err) { return AddTicker(entry, err); });
+    if (added > 1) { SetStatus(L"Added " + std::to_wstring(added) + L" tickers"); }
+}
+
+bool App::AddTicker(const StockEntry& entry, std::wstring& err) {
+    assert(!entry.symbol.empty());
+    if (cfg_.stockCount >= kMaxStocks) {
+        err = L"Limit of " + std::to_wstring(kMaxStocks) + L" tickers reached";
+        return false;
     }
+    if (!WriteStockEntry(cfg_.path, entry, err)) { return false; }
     const size_t index = cfg_.stockCount;
     cfg_.stocks[index] = entry;
     ++cfg_.stockCount;
@@ -716,6 +723,62 @@ void App::OnAddTicker() {
     SelectStock(index);
     SetStatus(L"Added " + entry.symbol);
     assert(cfg_.stockCount <= kMaxStocks);
+    return true;
+}
+
+void App::OnEditTicker() {
+    assert(selected_ < cfg_.stockCount);
+    const size_t index = selected_;
+    StockEntry edited = cfg_.stocks[index];
+    if (!RunEditTickerDialog(hInst_, hwnd_, cfg_, fetcher_, index, edited)) { return; }
+    std::wstring err;
+    if (!ApplyTickerEdit(index, edited, err)) { SetStatus(err); }
+}
+
+// Renames/relabels cfg_.stocks[index] in the file and in memory. Holding and
+// alert settings follow the ticker; list order is preserved.
+bool App::ApplyTickerEdit(size_t index, const StockEntry& edited, std::wstring& err) {
+    assert(index < cfg_.stockCount);
+    assert(!edited.symbol.empty());
+    const StockEntry old = cfg_.stocks[index];
+    const bool symbolChanged = !SameSymbol(old.symbol, edited.symbol);
+    const bool nameChanged   = old.name != edited.name;
+    if (!symbolChanged && !nameChanged) { return true; }
+
+    StockEntry& e = cfg_.stocks[index];
+    e.symbol = edited.symbol;
+    e.name   = edited.name;
+    bool ok = true;
+    if (symbolChanged) {
+        // Old keys go (stocks/holdings/alerts), then the section is rewritten
+        // in order with the new symbol, then holding/alert are re-keyed.
+        ok = DeleteStockEntry(cfg_.path, old.symbol, err) &&
+             WriteStockOrder(cfg_.path, cfg_, err) &&
+             WriteHolding(cfg_.path, e.symbol, e.holding, err) &&
+             WriteAlert(cfg_.path, e.symbol, e.alert, err);
+    } else {
+        ok = WriteStockEntry(cfg_.path, e, err);
+    }
+    if (!ok) {
+        cfg_.stocks[index] = old;   // keep memory and file consistent
+        return false;
+    }
+
+    if (symbolChanged) {
+        (*summaries_)[index] = QuoteData{};
+        chartValid_[index]   = false;
+        alerts_[index]       = AlertState{};
+        if (index == selected_) { insetValid_ = false; }
+    }
+    RebuildList();
+    fetcher_.UpdateConfig(cfg_);
+    RequestAllSummaries();
+    RequestQuotes();
+    SelectStock(index);
+    Layout();
+    InvalidateRect(hwnd_, nullptr, TRUE);
+    SetStatus(symbolChanged ? old.symbol + L" is now " + e.symbol : L"Renamed " + e.symbol);
+    return true;
 }
 
 void App::OnRemoveTicker() {
@@ -869,6 +932,10 @@ void App::OnCommand(int id, UINT code) {
         if (sel != LB_ERR) { SelectStock(static_cast<size_t>(sel)); }
         return;
     }
+    if (id == IDC_LIST && code == LBN_DBLCLK) {
+        OnEditTicker();
+        return;
+    }
     if (id >= IDC_RANGE_BASE && id < IDC_RANGE_BASE + static_cast<int>(kRanges.size()) && code == BN_CLICKED) {
         SelectRange(static_cast<size_t>(id - IDC_RANGE_BASE));
         return;
@@ -899,6 +966,7 @@ void App::OnCommand(int id, UINT code) {
     case IDM_RELOAD:    OnReloadConfig(); break;
     case IDC_ADD:
     case IDM_ADD:       OnAddTicker(); break;
+    case IDM_EDIT:      OnEditTicker(); break;
     case IDC_REMOVE:
     case IDM_REMOVE:    OnRemoveTicker(); break;
     case IDM_MOVEUP:    OnMoveTicker(-1); break;
@@ -1330,7 +1398,7 @@ void App::PaintStats(Graphics& g) {
         { L"Low",          m.dayLow  > 0.0 ? FormatPrice(m.dayLow)  : (today ? FormatPrice(today->low)  : dash) },
         { L"Prev close",   pc.valid ? FormatPrice(pc.prev) : dash },
         { L"Volume",       m.dayVolume > 0.0 ? FormatVolume(m.dayVolume) : (today ? FormatVolume(today->volume) : dash) },
-        { L"Avg vol (3M)", qs ? FormatVolume(qs->avgVolume3M) : dash },
+        { L"Avg vol (3M)", (qs && qs->avgVolume3M > 0.0) ? FormatVolume(qs->avgVolume3M) : dash },
         { L"52W high",     m.wk52High > 0.0 ? FormatPrice(m.wk52High) : dash },
         { L"52W low",      m.wk52Low  > 0.0 ? FormatPrice(m.wk52Low)  : dash },
         { L"Market cap",   qs ? FormatCompact(qs->marketCap) : dash },

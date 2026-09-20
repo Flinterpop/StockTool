@@ -72,6 +72,9 @@ private:
 
     // ticker commands
     void OnAddTicker();
+    bool AddTicker(const StockEntry& entry, std::wstring& err);   // called from the dialog
+    void OnEditTicker();
+    bool ApplyTickerEdit(size_t index, const StockEntry& edited, std::wstring& err);
     void OnRemoveTicker();
     void OnMoveTicker(int delta);
     void OnEditHolding();

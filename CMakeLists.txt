@@ -57,10 +57,14 @@ target_link_libraries(StockTool PRIVATE
     gdiplus comctl32 dwmapi uxtheme shell32 advapi32
 )
 
-# Ship the default config next to the executable.
+# Seed the default config next to the executable on the first build only:
+# the app writes holdings, alerts and window state back into that file, so
+# rebuilding must not overwrite it.
 add_custom_command(TARGET StockTool POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_SOURCE_DIR}/stocktool.cfg" "$<TARGET_FILE_DIR:StockTool>/stocktool.cfg"
+    COMMAND ${CMAKE_COMMAND}
+        -DSRC=${CMAKE_SOURCE_DIR}/stocktool.cfg
+        -DDST=$<TARGET_FILE_DIR:StockTool>/stocktool.cfg
+        -P ${CMAKE_SOURCE_DIR}/cmake/copy_if_missing.cmake
 )
 
 # ---- Tests -----------------------------------------------------------------

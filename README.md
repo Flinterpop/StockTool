@@ -38,7 +38,7 @@ RY.TO=300,0
 [state]                   ; written by the app on exit: window placement, range, toggles, selection
 ```
 
-- Symbols use Yahoo Finance notation: `.TO` for TSX, `.V` for TSX Venture, bare symbol for NYSE/Nasdaq; class shares use a dash (`BRK-B`, `RCI-B.TO`). TMX Group is the company that owns the Toronto Stock Exchange; the exchange was abbreviated TSE until 2002 and is TSX now, so `money.tmx.com/en/quote/RY` and `RY.TO` are the same listing.
+- Symbols use Yahoo Finance notation: `.TO` for TSX, `.V` for TSX Venture, bare symbol for NYSE/Nasdaq; class shares use a dash (`BRK-B`, `RCI-B.TO`). Canadian **mutual funds** are not listed under their fund codes (`TDB902` finds nothing) — search by name in the Add dialog and pick the fund; the symbol is a Morningstar-style ID such as `0P0000A30L` (TD U.S. Index Fund e-Series). Funds have a daily NAV only, so intraday ranges (1D/5D) are empty and volume/open/high/low show `-`. TMX Group is the company that owns the Toronto Stock Exchange; the exchange was abbreviated TSE until 2002 and is TSX now, so `money.tmx.com/en/quote/RY` and `RY.TO` are the same listing.
 - Up to 32 symbols; extra entries are ignored. The order in `[stocks]` is the list order (Ticker > Move up/down rewrites the section).
 - `url_template` (chart bars) is substituted with `{symbol}`, `{range}` and `{interval}`; `quote_url_template` (fundamentals) with `{symbols}` (comma-separated) and `{crumb}`. Leave `quote_url_template` empty to disable fundamentals. `search_url_template` (symbol search in the Add dialog) is substituted with `{query}`; leave it empty to disable search.
 
@@ -53,7 +53,7 @@ build\Release\StockTool.exe
 build\Release\stocktool_tests.exe   # Catch2 unit tests (parser, config, indicators, formatting)
 ```
 
-The build uses `/W4 /WX /permissive-` and the static CRT (vcpkg `x64-windows-static`), so the exe has no VC++ redistributable dependency. The UI-free parts are a static library (`stocktool_core`) shared by the app and the tests.
+The build uses `/W4 /WX /permissive-` and the static CRT (vcpkg `x64-windows-static`), so the exe has no VC++ redistributable dependency. The first build seeds `stocktool.cfg` next to the exe; later builds leave it alone, because the app writes holdings, alerts and window state back into it. The UI-free parts are a static library (`stocktool_core`) shared by the app and the tests.
 
 ## Releasing
 
@@ -93,7 +93,7 @@ Notes:
 - Click a symbol to select it; range buttons switch the chart range; **Candles** toggles line/candlestick; **Compare** overlays every ticker as % change over the range; **Refresh (F5)** re-fetches everything now. Prices auto-refresh on the configured interval.
 - **View** menu: SMA 20, SMA 50, Bollinger bands (20, 2σ), RSI (14) pane, the trend inset, theme (system/light/dark) and minimize-to-tray. All toggles are remembered.
 - The trend inset can be **dragged** anywhere inside the plot (the cursor changes to a move cursor over it); its position is remembered as a fraction of the plot, so it stays put across resizes and DPI changes.
-- **Add… (Ctrl+N)** has a search box: type a company name or partial symbol and pick from the results (symbol, name, exchange, type) — the fields fill in; double-click adds straight away. You can still type a symbol directly.
-- **Ticker** menu (also right-click on the list): **Add… (Ctrl+N)**, **Remove**, **Move up/down (Ctrl+Up/Down)**, **Holding…** (shares + average cost → portfolio strip above the list, holding line in the header) and **Alerts…** (price above/below).
+- **Add… (Ctrl+N)** has a search box: type a company name or partial symbol and pick from the results (symbol, name, exchange, type) — the fields fill in; double-click adds straight away. You can still type a symbol directly. The dialog stays open after each add so you can enter several tickers in a row; **Close** (or Esc) dismisses it.
+- **Ticker** menu (also right-click on the list): **Add… (Ctrl+N)**, **Edit… (F2, or double-click a row)** to change a ticker's symbol or display name with the same search box — holdings and alerts follow it and its place in the list is kept — **Remove**, **Move up/down (Ctrl+Up/Down)**, **Holding…** (shares + average cost → portfolio strip above the list, holding line in the header) and **Alerts…** (price above/below).
 - Hover over the chart for a crosshair with date, O/H/L/C, volume and RSI; in Compare mode the tooltip lists every ticker's % change at that date.
 - The tray icon's tooltip shows every ticker's last price; left-click shows the window, right-click gives Show / Refresh / Exit.
