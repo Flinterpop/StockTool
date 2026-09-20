@@ -33,7 +33,7 @@ constexpr char kIni[] =
     "[settings]\r\n"
     "refresh_seconds=5\r\n"          // below the floor: clamped to 10
     "default_range=5y\r\n"           // case-insensitive
-    "inset_range=1D\r\n"             // not allowed: falls back to 1Y
+    "inset_range=1D\r\n"             // not allowed: falls back to 5Y
     "theme=Dark\r\n"
     "start_minimized=1\r\n"
     "url_template=https://example.test/{symbol}?r={range}&i={interval}\r\n"
@@ -60,7 +60,7 @@ TEST_CASE("LoadConfig reads settings, stocks, holdings and alerts") {
     REQUIRE(LoadConfig(ini.path, cfg, err));
     CHECK(cfg.refreshSeconds == 10u);
     CHECK(cfg.defaultRange == kRange5Y);
-    CHECK(cfg.insetRange == kRange1Y);
+    CHECK(cfg.insetRange == kRange5Y);
     CHECK(cfg.theme == ThemeMode::Dark);
     CHECK(cfg.startMinimized);
     CHECK_FALSE(cfg.minimizeToTray);

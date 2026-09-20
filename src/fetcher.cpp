@@ -46,6 +46,7 @@ bool Fetcher::Start(HWND notify, const Config& cfg, std::wstring& err) {
     charts_    = std::make_unique<std::array<QuoteData, kMaxStocks>>();
     inset_     = std::make_unique<QuoteData>();
     quotes_    = std::make_unique<std::array<QuoteStats, kMaxStocks>>();
+    search_    = std::make_unique<std::array<SearchHit, kMaxSearchHits>>();
     stop_      = false;
 
     unsigned id = 0;
@@ -85,8 +86,9 @@ void Fetcher::Run() {
     for (;;) {
         FetchJob job;
         if (!Pop(job)) { return; }
-        if (job.kind == JobKind::Quote) { ProcessQuote(job); }
-        else                            { Process(job); }
+        if (job.kind == JobKind::Quote)       { ProcessQuote(job); }
+        else if (job.kind == JobKind::Search) { ProcessSearch(job); }
+        else                                  { Process(job); }
     }
 }
 
@@ -110,10 +112,11 @@ void Fetcher::UpdateConfig(const Config& cfg) {
 
 bool Fetcher::Enqueue(JobKind kind, size_t stock, size_t range) {
     assert(thread_ != nullptr);
-    assert(kind != JobKind::Quote);
+    assert(kind == JobKind::Summary || kind == JobKind::Chart || kind == JobKind::Inset);
     assert(stock < cfg_.stockCount);
     assert(range < kRanges.size());
-    if (stock >= cfg_.stockCount || range >= kRanges.size() || kind == JobKind::Quote) { return false; }
+    if (stock >= cfg_.stockCount || range >= kRanges.size() ||
+        (kind != JobKind::Summary && kind != JobKind::Chart && kind != JobKind::Inset)) { return false; }
     {
         std::lock_guard<std::mutex> lock(qMutex_);
         for (size_t k = 0; k < qCount_; ++k) {
@@ -158,6 +161,40 @@ bool Fetcher::EnqueueQuote() {
         slot.range  = 0;
         slot.symbol = L"*";
         slot.url    = url;
+        ++qCount_;
+    }
+    qCv_.notify_one();
+    return true;
+}
+
+bool Fetcher::EnqueueSearch(const std::wstring& query, HWND notify) {
+    assert(thread_ != nullptr);
+    assert(notify != nullptr);
+    if (cfg_.searchUrlTemplate.empty() || query.empty() || query.size() > 64) { return false; }
+    std::wstring url = cfg_.searchUrlTemplate;
+    ReplaceAll(url, L"{query}", UrlEncode(query));
+    {
+        std::lock_guard<std::mutex> lock(qMutex_);
+        // Drop any search still waiting: only the newest query matters.
+        size_t kept = 0;
+        for (size_t k = 0; k < qCount_; ++k) {
+            const size_t from = (qHead_ + k) % kMaxJobs;
+            if (queue_[from].kind == JobKind::Search) { continue; }
+            const size_t to = (qHead_ + kept) % kMaxJobs;
+            if (to != from) { queue_[to] = queue_[from]; }
+            ++kept;
+        }
+        qCount_ = kept;
+        if (qCount_ >= kMaxJobs) { return false; }
+        // Insert at the head so the user is not waiting behind refreshes.
+        qHead_ = (qHead_ + kMaxJobs - 1) % kMaxJobs;
+        FetchJob& slot = queue_[qHead_];
+        slot.kind   = JobKind::Search;
+        slot.stock  = 0;
+        slot.range  = 0;
+        slot.symbol = query;
+        slot.url    = url;
+        slot.notify = notify;
         ++qCount_;
     }
     qCv_.notify_one();
@@ -219,7 +256,8 @@ void Fetcher::Process(const FetchJob& job) {
             msg = WM_APP_INSET_READY;
             break;
         case JobKind::Quote:
-            assert(false);  // handled by ProcessQuote
+        case JobKind::Search:
+            assert(false);  // handled by ProcessQuote / ProcessSearch
             break;
         }
     }
@@ -284,6 +322,38 @@ void Fetcher::ProcessQuote(const FetchJob& job) {
     const BOOL posted = PostMessageW(notify_, WM_APP_QUOTE_READY, 0, 0);
     assert(posted);
     (void)posted;
+}
+
+void Fetcher::ProcessSearch(const FetchJob& job) {
+    assert(job.kind == JobKind::Search && !job.url.empty() && job.notify != nullptr);
+    std::wstring err;
+    size_t       count = 0;
+    HttpResult   res;
+    bool ok = http_.Get(job.url, buf_.get(), kHttpBufSize, res, err);
+    {
+        std::lock_guard<std::mutex> lock(dataMutex_);
+        if (ok) {
+            ok = ParseSearchJson(buf_.get(), res.length, *search_, count, err);
+            if (!ok && res.status != 200) { err = L"HTTP " + std::to_wstring(res.status) + L": " + err; }
+        }
+        searchCount_ = ok ? count : 0;
+        searchQuery_ = job.symbol;
+        searchError_ = ok ? L"" : err;
+    }
+    // The dialog may already be gone; a failed post is harmless.
+    const BOOL posted = PostMessageW(job.notify, WM_APP_SEARCH_READY, 0, 0);
+    (void)posted;
+}
+
+bool Fetcher::CopySearch(std::array<SearchHit, kMaxSearchHits>& out, size_t& count,
+                         std::wstring& query, std::wstring& err) {
+    if (!search_) { return false; }
+    std::lock_guard<std::mutex> lock(dataMutex_);
+    out   = *search_;
+    count = searchCount_;
+    query = searchQuery_;
+    err   = searchError_;
+    return true;
 }
 
 bool Fetcher::CopySummary(size_t stock, QuoteData& out) {

@@ -65,10 +65,66 @@ std::wstring AmountText(double v) {
 // ---------------------------------------------------------------------------
 // Add ticker
 
+constexpr UINT_PTR kSearchTimer   = 1;
+constexpr UINT     kSearchDelayMs = 350;   // typing debounce
+
 struct AddState {
-    const Config* cfg = nullptr;
+    const Config* cfg     = nullptr;
+    Fetcher*      fetcher = nullptr;
     StockEntry    result;
+    std::array<SearchHit, kMaxSearchHits> hits{};
+    size_t        hitCount = 0;
 };
+
+AddState* StateOf(HWND dlg) {
+    return reinterpret_cast<AddState*>(GetWindowLongPtrW(dlg, DWLP_USER));
+}
+
+void StartSearch(HWND dlg, AddState& st) {
+    assert(st.fetcher != nullptr);
+    KillTimer(dlg, kSearchTimer);
+    std::wstring q = FieldText(dlg, IDC_QUERY);
+    // trim
+    while (!q.empty() && std::iswspace(q.front()) != 0) { q.erase(q.begin()); }
+    while (!q.empty() && std::iswspace(q.back()) != 0) { q.pop_back(); }
+    if (q.size() < 2) { return; }
+    if (st.fetcher->EnqueueSearch(q, dlg)) {
+        SetDlgItemTextW(dlg, IDC_HINT, L"Searching…");
+    }
+}
+
+void ShowSearchResults(HWND dlg, AddState& st) {
+    assert(st.fetcher != nullptr);
+    std::wstring query;
+    std::wstring err;
+    if (!st.fetcher->CopySearch(st.hits, st.hitCount, query, err)) { return; }
+    const HWND list = GetDlgItem(dlg, IDC_RESULTS);
+    SendMessageW(list, LB_RESETCONTENT, 0, 0);
+    if (!err.empty()) {
+        st.hitCount = 0;
+        SetDlgItemTextW(dlg, IDC_HINT, (L"Search failed: " + err).c_str());
+        return;
+    }
+    for (size_t i = 0; i < st.hitCount && i < kMaxSearchHits; ++i) {
+        const SearchHit& h = st.hits[i];
+        std::wstring row = h.symbol + L"\t" + h.name;
+        std::wstring where = h.exchange;
+        if (!h.type.empty()) { where += (where.empty() ? L"" : L", ") + h.type; }
+        if (!where.empty()) { row += L"  (" + where + L")"; }
+        SendMessageW(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(row.c_str()));
+    }
+    SetDlgItemTextW(dlg, IDC_HINT, (st.hitCount == 0)
+                        ? (L"No matches for \"" + query + L"\"").c_str()
+                        : L"Pick a result, or type a symbol below.");
+}
+
+void UseSearchResult(HWND dlg, AddState& st, size_t index) {
+    if (index >= st.hitCount) { return; }
+    const SearchHit& h = st.hits[index];
+    SetDlgItemTextW(dlg, IDC_SYMBOL, h.symbol.c_str());
+    SetDlgItemTextW(dlg, IDC_NAME, h.name.c_str());
+    SetDlgItemTextW(dlg, IDC_HINT, L"");
+}
 
 bool ReadAddFields(HWND dlg, AddState& st) {
     assert(st.cfg != nullptr);
@@ -93,18 +149,64 @@ bool ReadAddFields(HWND dlg, AddState& st) {
 
 INT_PTR CALLBACK AddProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
-    case WM_INITDIALOG:
+    case WM_INITDIALOG: {
         SetWindowLongPtrW(dlg, DWLP_USER, static_cast<LONG_PTR>(lp));
+        auto* st = reinterpret_cast<AddState*>(lp);
+        assert(st != nullptr && st->fetcher != nullptr);
+        SendDlgItemMessageW(dlg, IDC_QUERY, EM_LIMITTEXT, 64, 0);
         SendDlgItemMessageW(dlg, IDC_SYMBOL, EM_LIMITTEXT, 31, 0);
         SendDlgItemMessageW(dlg, IDC_NAME, EM_LIMITTEXT, 63, 0);
+        const int tab = 60;  // dialog units: symbol column, then name
+        SendDlgItemMessageW(dlg, IDC_RESULTS, LB_SETTABSTOPS, 1, reinterpret_cast<LPARAM>(&tab));
+        if (!st->fetcher->SearchEnabled()) {
+            EnableWindow(GetDlgItem(dlg, IDC_QUERY), FALSE);
+            EnableWindow(GetDlgItem(dlg, IDC_SEARCH), FALSE);
+            EnableWindow(GetDlgItem(dlg, IDC_RESULTS), FALSE);
+            SetDlgItemTextW(dlg, IDC_HINT, L"Search is disabled (search_url_template is empty).");
+            SetFocus(GetDlgItem(dlg, IDC_SYMBOL));
+            CentreOnOwner(dlg);
+            return FALSE;  // we set the focus ourselves
+        }
         CentreOnOwner(dlg);
+        return TRUE;  // focus goes to the first control: the search box
+    }
+    case WM_TIMER:
+        if (wp == kSearchTimer) {
+            AddState* st = StateOf(dlg);
+            if (st != nullptr) { StartSearch(dlg, *st); }
+        }
         return TRUE;
+    case WM_APP_SEARCH_READY: {
+        AddState* st = StateOf(dlg);
+        if (st != nullptr) { ShowSearchResults(dlg, *st); }
+        return TRUE;
+    }
     case WM_COMMAND: {
-        const int id = LOWORD(wp);
+        const int  id   = LOWORD(wp);
+        const UINT code = HIWORD(wp);
+        AddState* st = StateOf(dlg);
+        if (st == nullptr) { return FALSE; }
+        if (id == IDC_QUERY && code == EN_CHANGE) {
+            SetTimer(dlg, kSearchTimer, kSearchDelayMs, nullptr);   // restart the debounce
+            return TRUE;
+        }
+        if (id == IDC_SEARCH) {
+            StartSearch(dlg, *st);
+            return TRUE;
+        }
+        if (id == IDC_RESULTS && (code == LBN_SELCHANGE || code == LBN_DBLCLK)) {
+            const LRESULT sel = SendDlgItemMessageW(dlg, IDC_RESULTS, LB_GETCURSEL, 0, 0);
+            if (sel != LB_ERR) { UseSearchResult(dlg, *st, static_cast<size_t>(sel)); }
+            if (code == LBN_DBLCLK && sel != LB_ERR && ReadAddFields(dlg, *st)) { EndDialog(dlg, IDOK); }
+            return TRUE;
+        }
         if (id == IDOK) {
-            auto* st = reinterpret_cast<AddState*>(GetWindowLongPtrW(dlg, DWLP_USER));
-            assert(st != nullptr);
-            if (st != nullptr && ReadAddFields(dlg, *st)) { EndDialog(dlg, IDOK); }
+            // Enter in the search box searches; elsewhere it adds.
+            if (GetFocus() == GetDlgItem(dlg, IDC_QUERY)) {
+                StartSearch(dlg, *st);
+                return TRUE;
+            }
+            if (ReadAddFields(dlg, *st)) { EndDialog(dlg, IDOK); }
             return TRUE;
         }
         if (id == IDCANCEL) {
@@ -113,6 +215,9 @@ INT_PTR CALLBACK AddProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return FALSE;
     }
+    case WM_DESTROY:
+        KillTimer(dlg, kSearchTimer);
+        return FALSE;
     default:
         return FALSE;
     }
@@ -221,10 +326,11 @@ INT_PTR CALLBACK AlertsProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
 
 } // namespace
 
-bool RunAddTickerDialog(HINSTANCE inst, HWND owner, const Config& cfg, StockEntry& out) {
+bool RunAddTickerDialog(HINSTANCE inst, HWND owner, const Config& cfg, Fetcher& fetcher, StockEntry& out) {
     assert(inst != nullptr && owner != nullptr);
     AddState st;
-    st.cfg = &cfg;
+    st.cfg     = &cfg;
+    st.fetcher = &fetcher;
     const INT_PTR rc = DialogBoxParamW(inst, MAKEINTRESOURCEW(IDD_ADDTICKER), owner, &AddProc,
                                        reinterpret_cast<LPARAM>(&st));
     if (rc != IDOK) { return false; }

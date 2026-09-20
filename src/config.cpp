@@ -1,8 +1,12 @@
 #include "config.h"
 
+#include <algorithm>
 #include <cassert>
 #include <cwchar>
 #include <cwctype>
+
+using std::max;
+using std::min;
 
 namespace st {
 namespace {
@@ -14,6 +18,9 @@ constexpr wchar_t kDefaultUrlTemplate[] =
 constexpr wchar_t kDefaultQuoteUrlTemplate[] =
     L"https://query2.finance.yahoo.com/v7/finance/quote?symbols={symbols}&crumb={crumb}";
 
+constexpr wchar_t kDefaultSearchUrlTemplate[] =
+    L"https://query2.finance.yahoo.com/v1/finance/search?q={query}&quotesCount=12&newsCount=0&listsCount=0";
+
 constexpr char kDefaultConfigText[] =
     "; StockTool configuration.\r\n"
     "; Symbols use Yahoo Finance notation: TSX = .TO, TSX Venture = .V,\r\n"
@@ -23,7 +30,7 @@ constexpr char kDefaultConfigText[] =
     "refresh_seconds=60\r\n"
     "default_range=1Y\r\n"
     "; Trend inset in the chart corner: 1Y or 5Y\r\n"
-    "inset_range=1Y\r\n"
+    "inset_range=5Y\r\n"
     "; system | light | dark\r\n"
     "theme=system\r\n"
     "start_minimized=0\r\n"
@@ -32,6 +39,8 @@ constexpr char kDefaultConfigText[] =
     "?range={range}&interval={interval}&includePrePost=false\r\n"
     "; Fundamentals (market cap, P/E, yield). Leave empty to disable.\r\n"
     "quote_url_template=https://query2.finance.yahoo.com/v7/finance/quote?symbols={symbols}&crumb={crumb}\r\n"
+    "; Symbol search in the Add dialog. Leave empty to disable.\r\n"
+    "search_url_template=https://query2.finance.yahoo.com/v1/finance/search?q={query}&quotesCount=12&newsCount=0&listsCount=0\r\n"
     "\r\n"
     "[stocks]\r\n"
     "RY.TO=Royal Bank of Canada\r\n"
@@ -194,8 +203,8 @@ bool LoadConfig(const std::wstring& path, Config& out, std::wstring& err) {
     const UINT refresh = GetPrivateProfileIntW(kSettings, L"refresh_seconds", 60, path.c_str());
     out.refreshSeconds = (refresh < 10u) ? 10u : (refresh > 3600u ? 3600u : refresh);
     out.defaultRange   = RangeIndexFromLabel(ReadString(path, kSettings, L"default_range", L"1Y"), kRange1Y);
-    out.insetRange     = RangeIndexFromLabel(ReadString(path, kSettings, L"inset_range", L"1Y"), kRange1Y);
-    if (out.insetRange != kRange1Y && out.insetRange != kRange5Y) { out.insetRange = kRange1Y; }
+    out.insetRange     = RangeIndexFromLabel(ReadString(path, kSettings, L"inset_range", L"5Y"), kRange5Y);
+    if (out.insetRange != kRange1Y && out.insetRange != kRange5Y) { out.insetRange = kRange5Y; }
 
     const std::wstring theme = ReadString(path, kSettings, L"theme", L"system");
     if (_wcsicmp(theme.c_str(), L"light") == 0)     { out.theme = ThemeMode::Light; }
@@ -212,6 +221,11 @@ bool LoadConfig(const std::wstring& path, Config& out, std::wstring& err) {
     out.quoteUrlTemplate = ReadString(path, kSettings, L"quote_url_template", kDefaultQuoteUrlTemplate);
     if (!out.quoteUrlTemplate.empty() && out.quoteUrlTemplate.find(L"{symbols}") == std::wstring::npos) {
         err = L"quote_url_template must contain {symbols} (or be empty)";
+        return false;
+    }
+    out.searchUrlTemplate = ReadString(path, kSettings, L"search_url_template", kDefaultSearchUrlTemplate);
+    if (!out.searchUrlTemplate.empty() && out.searchUrlTemplate.find(L"{query}") == std::wstring::npos) {
+        err = L"search_url_template must contain {query} (or be empty)";
         return false;
     }
 
@@ -240,6 +254,11 @@ void LoadViewState(const std::wstring& path, ViewState& out) {
     out.bollinger = ReadBool(path, kState, L"bollinger", false);
     out.rsi       = ReadBool(path, kState, L"rsi", false);
     out.inset     = ReadBool(path, kState, L"inset", true);
+    double ix = 0.0;
+    double iy = 0.0;
+    ParsePair(ReadString(path, kState, L"inset_pos", L""), ix, iy);
+    out.insetX    = static_cast<float>(min(max(ix, 0.0), 1.0));
+    out.insetY    = static_cast<float>(min(max(iy, 0.0), 1.0));
     out.selected  = ReadString(path, kState, L"selected", L"");
 }
 
@@ -260,6 +279,7 @@ bool SaveViewState(const std::wstring& path, const ViewState& s, std::wstring& e
         { L"bollinger", s.bollinger ? L"1" : L"0" },
         { L"rsi",       s.rsi ? L"1" : L"0" },
         { L"inset",     s.inset ? L"1" : L"0" },
+        { L"inset_pos", FormatPair(s.insetX, s.insetY) },
         { L"selected",  s.selected },
     };
     for (const auto& it : items) {

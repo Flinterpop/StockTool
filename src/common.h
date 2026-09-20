@@ -69,6 +69,16 @@ struct QuoteStats {
     double prevClose        = 0.0;
 };
 
+// One row from the symbol search endpoint.
+constexpr size_t kMaxSearchHits = 20;
+
+struct SearchHit {
+    std::wstring symbol;
+    std::wstring name;
+    std::wstring exchange;   // e.g. "Toronto"
+    std::wstring type;       // e.g. "Equity", "ETF"
+};
+
 // Per-ticker user data kept in stocktool.cfg.
 struct Holding {
     double qty  = 0.0;  // shares held

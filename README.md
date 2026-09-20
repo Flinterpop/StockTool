@@ -17,12 +17,13 @@ Everything lives in `stocktool.cfg` next to the executable (created with default
 [settings]
 refresh_seconds=60        ; 10..3600
 default_range=1Y          ; 1D 5D 1M 6M YTD 1Y 5Y MAX (the last-used range wins once saved)
-inset_range=1Y            ; trend inset: 1Y or 5Y
+inset_range=5Y            ; trend inset: 5Y or 1Y
 theme=system              ; system | light | dark
 start_minimized=0
 minimize_to_tray=0
 url_template=https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range={range}&interval={interval}&includePrePost=false
 quote_url_template=https://query2.finance.yahoo.com/v7/finance/quote?symbols={symbols}&crumb={crumb}
+search_url_template=https://query2.finance.yahoo.com/v1/finance/search?q={query}&quotesCount=12&newsCount=0&listsCount=0
 
 [stocks]
 RY.TO=Royal Bank of Canada
@@ -39,7 +40,7 @@ RY.TO=300,0
 
 - Symbols use Yahoo Finance notation: `.TO` for TSX, `.V` for TSX Venture, bare symbol for NYSE/Nasdaq; class shares use a dash (`BRK-B`, `RCI-B.TO`). TMX Group is the company that owns the Toronto Stock Exchange; the exchange was abbreviated TSE until 2002 and is TSX now, so `money.tmx.com/en/quote/RY` and `RY.TO` are the same listing.
 - Up to 32 symbols; extra entries are ignored. The order in `[stocks]` is the list order (Ticker > Move up/down rewrites the section).
-- `url_template` (chart bars) is substituted with `{symbol}`, `{range}` and `{interval}`; `quote_url_template` (fundamentals) with `{symbols}` (comma-separated) and `{crumb}`. Leave `quote_url_template` empty to disable fundamentals.
+- `url_template` (chart bars) is substituted with `{symbol}`, `{range}` and `{interval}`; `quote_url_template` (fundamentals) with `{symbols}` (comma-separated) and `{crumb}`. Leave `quote_url_template` empty to disable fundamentals. `search_url_template` (symbol search in the Add dialog) is substituted with `{query}`; leave it empty to disable search.
 
 ## Building and testing
 
@@ -91,6 +92,8 @@ Notes:
 
 - Click a symbol to select it; range buttons switch the chart range; **Candles** toggles line/candlestick; **Compare** overlays every ticker as % change over the range; **Refresh (F5)** re-fetches everything now. Prices auto-refresh on the configured interval.
 - **View** menu: SMA 20, SMA 50, Bollinger bands (20, 2σ), RSI (14) pane, the trend inset, theme (system/light/dark) and minimize-to-tray. All toggles are remembered.
+- The trend inset can be **dragged** anywhere inside the plot (the cursor changes to a move cursor over it); its position is remembered as a fraction of the plot, so it stays put across resizes and DPI changes.
+- **Add… (Ctrl+N)** has a search box: type a company name or partial symbol and pick from the results (symbol, name, exchange, type) — the fields fill in; double-click adds straight away. You can still type a symbol directly.
 - **Ticker** menu (also right-click on the list): **Add… (Ctrl+N)**, **Remove**, **Move up/down (Ctrl+Up/Down)**, **Holding…** (shares + average cost → portfolio strip above the list, holding line in the header) and **Alerts…** (price above/below).
 - Hover over the chart for a crosshair with date, O/H/L/C, volume and RSI; in Compare mode the tooltip lists every ticker's % change at that date.
 - The tray icon's tooltip shows every ticker's last price; left-click shows the window, right-click gives Show / Refresh / Exit.

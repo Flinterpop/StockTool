@@ -235,8 +235,13 @@ LRESULT App::Handle(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_COMMAND:      OnCommand(LOWORD(wp), HIWORD(wp)); return 0;
     case WM_CONTEXTMENU:  OnContextMenu(reinterpret_cast<HWND>(wp), GET_X_LPARAM(lp), GET_Y_LPARAM(lp)); return 0;
     case WM_TIMER:        if (wp == kRefreshTimer) { OnTimer(); } return 0;
-    case WM_MOUSEMOVE:    OnMouseMove(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)); return 0;
+    case WM_MOUSEMOVE:    OnMouseMove(GET_X_LPARAM(lp), GET_Y_LPARAM(lp), (wp & MK_LBUTTON) != 0); return 0;
     case WM_MOUSELEAVE:   OnMouseLeave(); return 0;
+    case WM_LBUTTONDOWN:  OnLButtonDown(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)); return 0;
+    case WM_LBUTTONUP:    OnLButtonUp(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)); return 0;
+    case WM_SETCURSOR:
+        if (LOWORD(lp) == HTCLIENT && OnSetCursor()) { return TRUE; }
+        break;
     case WM_DPICHANGED:   OnDpiChanged(wp, lp); return 0;
     case WM_SETTINGCHANGE: OnSettingChange(lp); return 0;
     case WM_MEASUREITEM:  OnMeasureItem(reinterpret_cast<MEASUREITEMSTRUCT*>(lp)); return TRUE;
@@ -691,7 +696,7 @@ void App::OnAddTicker() {
         return;
     }
     StockEntry entry;
-    if (!RunAddTickerDialog(hInst_, hwnd_, cfg_, entry)) { return; }
+    if (!RunAddTickerDialog(hInst_, hwnd_, cfg_, fetcher_, entry)) { return; }
     std::wstring err;
     if (!WriteStockEntry(cfg_.path, entry, err)) {
         SetStatus(err);
@@ -938,7 +943,24 @@ void App::OnTimer() {
     if (state_.inset && !insetValid_) { RequestInset(); }
 }
 
-void App::OnMouseMove(int x, int y) {
+void App::OnMouseMove(int x, int y, bool buttonDown) {
+    if (dragging_) {
+        if (!buttonDown) {          // released outside the window: treat as a drop
+            OnLButtonUp(x, y);
+            return;
+        }
+        const float px = static_cast<float>(x) - dragDX_;
+        const float py = static_cast<float>(y) - dragDY_;
+        float fx = state_.insetX;
+        float fy = state_.insetY;
+        ChartInsetFractionFor(ToRectF(chartRect_), BuildChartInput(), scale_, px, py, fx, fy);
+        if (fx != state_.insetX || fy != state_.insetY) {
+            state_.insetX = fx;
+            state_.insetY = fy;
+            InvalidateRect(hwnd_, &chartRect_, FALSE);
+        }
+        return;
+    }
     if (!tracking_) {
         TRACKMOUSEEVENT tme{};
         tme.cbSize    = sizeof(tme);
@@ -946,10 +968,11 @@ void App::OnMouseMove(int x, int y) {
         tme.hwndTrack = hwnd_;
         tracking_ = (TrackMouseEvent(&tme) != FALSE);
     }
+    // The chart is drawn in client coordinates, so hover is client coordinates too.
     const POINT p{ x, y };
     const bool inChart = PtInRect(&chartRect_, p) != FALSE;
-    const int nx = inChart ? x - chartRect_.left : -1;
-    const int ny = inChart ? y - chartRect_.top : -1;
+    const int nx = inChart ? x : -1;
+    const int ny = inChart ? y : -1;
     if (nx != hoverX_ || ny != hoverY_) {
         hoverX_ = nx;
         hoverY_ = ny;
@@ -1055,6 +1078,77 @@ void App::OnQuoteReady() {
 }
 
 // ---------------------------------------------------------------------------
+// Chart input / inset dragging
+
+ChartInput App::BuildChartInput() {
+    assert(selected_ < cfg_.stockCount);
+    ChartInput in;
+    in.data           = chartValid_[selected_] ? &(*charts_)[selected_] : nullptr;
+    in.range          = &kRanges[range_];
+    in.opts.candles   = state_.candles;
+    in.opts.sma20     = state_.sma20;
+    in.opts.sma50     = state_.sma50;
+    in.opts.bollinger = state_.bollinger;
+    in.opts.rsi       = state_.rsi;
+    in.opts.inset     = state_.inset;
+    in.inset          = insetValid_ ? inset_.get() : nullptr;
+    in.insetLabel     = kRanges[cfg_.insetRange].label;
+    in.insetX         = state_.insetX;
+    in.insetY         = state_.insetY;
+    in.compare        = state_.compare;
+    for (size_t i = 0; i < cfg_.stockCount; ++i) {
+        compareEntries_[i].data   = chartValid_[i] ? &(*charts_)[i] : nullptr;
+        compareEntries_[i].symbol = cfg_.stocks[i].symbol.c_str();
+    }
+    in.entries    = compareEntries_.data();
+    in.entryCount = cfg_.stockCount;
+    in.hoverX     = dragging_ ? -1 : hoverX_;   // no crosshair while dragging
+    in.hoverY     = dragging_ ? -1 : hoverY_;
+    in.theme      = theme_;
+    return in;
+}
+
+// `box` comes back in client coordinates, like everything the chart draws.
+bool App::InsetHit(int x, int y, RectF& box) {
+    const POINT p{ x, y };
+    if (!PtInRect(&chartRect_, p)) { return false; }
+    if (!ChartInsetRect(ToRectF(chartRect_), BuildChartInput(), scale_, box)) { return false; }
+    return box.Contains(static_cast<float>(x), static_cast<float>(y)) != FALSE;
+}
+
+void App::OnLButtonDown(int x, int y) {
+    RectF box;
+    if (!InsetHit(x, y, box)) { return; }
+    dragging_ = true;
+    dragDX_   = static_cast<float>(x) - box.X;
+    dragDY_   = static_cast<float>(y) - box.Y;
+    // Capture keeps moves coming while the cursor is outside the window; it
+    // is best effort (refused for a background window) - the drag itself
+    // follows the button state in the mouse messages, not the capture.
+    SetCapture(hwnd_);
+    SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
+}
+
+void App::OnLButtonUp(int x, int y) {
+    (void)x;
+    (void)y;
+    if (!dragging_) { return; }
+    dragging_ = false;
+    if (GetCapture() == hwnd_) { ReleaseCapture(); }
+    SaveState();   // remember the new spot right away
+    InvalidateRect(hwnd_, &chartRect_, FALSE);
+}
+
+bool App::OnSetCursor() {
+    POINT p{};
+    if (!GetCursorPos(&p) || !ScreenToClient(hwnd_, &p)) { return false; }
+    RectF box;
+    if (!dragging_ && !InsetHit(p.x, p.y, box)) { return false; }
+    SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // Painting
 
 void App::EnsureBackBuffer(HDC hdc, int w, int h) {
@@ -1100,27 +1194,7 @@ void App::OnPaint() {
             PaintHeader(g);
             PaintPortfolio(g);
 
-            ChartInput in;
-            in.data          = chartValid_[selected_] ? &(*charts_)[selected_] : nullptr;
-            in.range         = &kRanges[range_];
-            in.opts.candles  = state_.candles;
-            in.opts.sma20    = state_.sma20;
-            in.opts.sma50    = state_.sma50;
-            in.opts.bollinger = state_.bollinger;
-            in.opts.rsi      = state_.rsi;
-            in.opts.inset    = state_.inset;
-            in.inset         = insetValid_ ? inset_.get() : nullptr;
-            in.insetLabel    = kRanges[cfg_.insetRange].label;
-            in.compare       = state_.compare;
-            for (size_t i = 0; i < cfg_.stockCount; ++i) {
-                compareEntries_[i].data   = chartValid_[i] ? &(*charts_)[i] : nullptr;
-                compareEntries_[i].symbol = cfg_.stocks[i].symbol.c_str();
-            }
-            in.entries    = compareEntries_.data();
-            in.entryCount = cfg_.stockCount;
-            in.hoverX     = hoverX_;
-            in.hoverY     = hoverY_;
-            in.theme      = theme_;
+            const ChartInput in = BuildChartInput();
             DrawChart(g, ToRectF(chartRect_), in, scale_);
             PaintStats(g);
             PaintStatus(g);

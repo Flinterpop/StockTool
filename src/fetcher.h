@@ -13,14 +13,15 @@
 
 namespace st {
 
-enum class JobKind : uint8_t { Summary, Chart, Inset, Quote };
+enum class JobKind : uint8_t { Summary, Chart, Inset, Quote, Search };
 
 struct FetchJob {
-    JobKind      kind  = JobKind::Summary;
-    size_t       stock = 0;   // index into Config::stocks at enqueue time
-    size_t       range = 0;   // index into kRanges (Chart/Inset)
-    std::wstring symbol;      // captured at enqueue time; the worker never reads Config
-    std::wstring url;         // likewise, built from the template at enqueue time
+    JobKind      kind   = JobKind::Summary;
+    size_t       stock  = 0;   // index into Config::stocks at enqueue time
+    size_t       range  = 0;   // index into kRanges (Chart/Inset)
+    std::wstring symbol;       // captured at enqueue time; the worker never reads Config
+    std::wstring url;          // likewise, built from the template at enqueue time
+    HWND         notify = nullptr;  // Search only: window that receives the result
 };
 
 // Posted to the notify window when a job completes.
@@ -28,6 +29,7 @@ constexpr UINT WM_APP_SUMMARY_READY = WM_APP + 1;  // wParam = stock
 constexpr UINT WM_APP_CHART_READY   = WM_APP + 2;  // wParam = stock, lParam = range
 constexpr UINT WM_APP_INSET_READY   = WM_APP + 3;  // wParam = stock, lParam = range
 constexpr UINT WM_APP_QUOTE_READY   = WM_APP + 4;  // fundamentals for all symbols
+constexpr UINT WM_APP_SEARCH_READY  = WM_APP + 5;  // posted to the search job's notify window
 
 class Fetcher {
 public:
@@ -51,12 +53,20 @@ public:
     // Returns false (without queuing) when the feature is disabled.
     bool EnqueueQuote();
 
+    // Queues a symbol search; the result goes to `notify` as
+    // WM_APP_SEARCH_READY. Replaces any pending search and jumps the queue.
+    // False when the feature is disabled or the query is empty.
+    bool EnqueueSearch(const std::wstring& query, HWND notify);
+    bool SearchEnabled() const { return !cfg_.searchUrlTemplate.empty(); }
+
     // Copy the latest result for the UI thread. False if none / stale. The
     // caller must compare QuoteData::symbol with what it expects at `stock`.
     bool CopySummary(size_t stock, QuoteData& out);
     bool CopyChart(size_t stock, size_t range, QuoteData& out);
     bool CopyInset(size_t stock, size_t range, QuoteData& out);
     bool CopyQuotes(std::array<QuoteStats, kMaxStocks>& out, size_t& count, std::wstring& err);
+    bool CopySearch(std::array<SearchHit, kMaxSearchHits>& out, size_t& count,
+                    std::wstring& query, std::wstring& err);
 
 private:
     static unsigned __stdcall ThreadEntry(void* arg);
@@ -64,6 +74,7 @@ private:
     bool Pop(FetchJob& job);
     void Process(const FetchJob& job);
     void ProcessQuote(const FetchJob& job);
+    void ProcessSearch(const FetchJob& job);
     bool Fetch(const std::wstring& url, QuoteData& out);
     bool EnsureCrumb(std::wstring& err);
     std::wstring BuildUrl(const std::wstring& symbol, const RangeSpec& spec) const;
@@ -98,6 +109,10 @@ private:
     std::unique_ptr<std::array<QuoteStats, kMaxStocks>> quotes_;
     size_t       quoteCount_ = 0;
     std::wstring quoteError_;
+    std::unique_ptr<std::array<SearchHit, kMaxSearchHits>> search_;
+    size_t       searchCount_ = 0;
+    std::wstring searchQuery_;
+    std::wstring searchError_;
 };
 
 } // namespace st

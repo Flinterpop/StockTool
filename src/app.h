@@ -55,8 +55,11 @@ private:
     void OnCommand(int id, UINT code);
     void OnContextMenu(HWND source, int x, int y);
     void OnTimer();
-    void OnMouseMove(int x, int y);
+    void OnMouseMove(int x, int y, bool buttonDown);
     void OnMouseLeave();
+    void OnLButtonDown(int x, int y);
+    void OnLButtonUp(int x, int y);
+    bool OnSetCursor();
     void OnDpiChanged(WPARAM wp, LPARAM lp);
     void OnMeasureItem(MEASUREITEMSTRUCT* mis);
     void OnDrawItem(const DRAWITEMSTRUCT* dis);
@@ -82,6 +85,8 @@ private:
     void SyncViewMenu();
 
     // helpers
+    ChartInput BuildChartInput();               // from current state (hover included)
+    bool InsetHit(int x, int y, Gdiplus::RectF& box);  // client px -> inset box (chart px)
     void CreateControls();
     void CreateFonts();
     void Layout();
@@ -168,6 +173,9 @@ private:
     int    hoverX_   = -1;
     int    hoverY_   = -1;
     bool   tracking_ = false;
+    bool   dragging_ = false;   // inset drag in progress (mouse captured)
+    float  dragDX_   = 0.0f;    // grab offset from the inset's top-left (px)
+    float  dragDY_   = 0.0f;
     float  scale_    = 1.0f;
     std::wstring status_;
 };

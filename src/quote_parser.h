@@ -13,4 +13,8 @@ bool ParseChartJson(const char* data, size_t len, QuoteData& out, std::wstring& 
 bool ParseQuoteBatchJson(const char* data, size_t len,
                          std::array<QuoteStats, kMaxStocks>& out, size_t& count, std::wstring& err);
 
+// Symbol search endpoint: one SearchHit per quote result, `count` set on return.
+bool ParseSearchJson(const char* data, size_t len,
+                     std::array<SearchHit, kMaxSearchHits>& out, size_t& count, std::wstring& err);
+
 } // namespace st

@@ -126,6 +126,35 @@ TEST_CASE("quote JSON: fundamentals per symbol") {
     CHECK(out[1].trailingPE == 0.0);                 // absent = unknown
 }
 
+TEST_CASE("search JSON: hits with names, exchange and type") {
+    constexpr char kSearchJson[] = R"({
+      "count": 3,
+      "quotes": [
+        { "symbol": "RY.TO", "shortname": "ROYAL BANK OF CANADA", "longname": "Royal Bank of Canada",
+          "exchDisp": "Toronto", "typeDisp": "Equity", "quoteType": "EQUITY", "exchange": "TOR" },
+        { "symbol": "RY", "shortname": "Royal Bank of Canada", "exchange": "NYQ", "quoteType": "EQUITY" },
+        { "index": "quotes", "score": 1 }
+      ],
+      "news": []
+    })";
+    std::array<SearchHit, kMaxSearchHits> out{};
+    size_t count = 0;
+    std::wstring err;
+    REQUIRE(ParseSearchJson(kSearchJson, std::strlen(kSearchJson), out, count, err));
+    REQUIRE(count == 2);                       // the symbol-less entry is skipped
+    CHECK(out[0].symbol == L"RY.TO");
+    CHECK(out[0].name == L"Royal Bank of Canada");   // longname preferred
+    CHECK(out[0].exchange == L"Toronto");
+    CHECK(out[0].type == L"Equity");
+    CHECK(out[1].symbol == L"RY");
+    CHECK(out[1].name == L"Royal Bank of Canada");   // shortname fallback
+    CHECK(out[1].exchange == L"NYQ");                // exchange code fallback
+    CHECK(out[1].type == L"EQUITY");
+
+    CHECK_FALSE(ParseSearchJson("{\"finance\":{\"error\":{\"description\":\"Too Many Requests\"}}}", 66, out, count, err));
+    CHECK(err.find(L"Too Many") != std::wstring::npos);
+}
+
 TEST_CASE("quote JSON: auth failure is reported") {
     std::array<QuoteStats, kMaxStocks> out{};
     size_t count = 0;

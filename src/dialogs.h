@@ -2,13 +2,15 @@
 #pragma once
 
 #include "config.h"
+#include "fetcher.h"
 
 #include <windows.h>
 
 namespace st {
 
 // Returns true with `out` filled when the user confirmed a valid entry.
-bool RunAddTickerDialog(HINSTANCE inst, HWND owner, const Config& cfg, StockEntry& out);
+// `fetcher` runs the symbol search (may have search disabled).
+bool RunAddTickerDialog(HINSTANCE inst, HWND owner, const Config& cfg, Fetcher& fetcher, StockEntry& out);
 
 // Edits `h` in place; returns true if the user pressed Save with valid input.
 bool RunHoldingDialog(HINSTANCE inst, HWND owner, const std::wstring& symbol, Holding& h);

@@ -28,16 +28,28 @@ struct ChartInput {
     ChartOptions     opts;
     const QuoteData* inset      = nullptr;  // trend inset data (nullptr = loading/off)
     const wchar_t*   insetLabel = nullptr;  // e.g. L"1Y"
+    float            insetX     = 0.0f;     // inset position as a fraction (0..1) of the
+    float            insetY     = 0.0f;     // free space in the plot; (0,0) = top-left
     bool             compare    = false;    // draw `entries` as % change instead of `data`
     const CompareEntry* entries = nullptr;
     size_t           entryCount = 0;
-    int              hoverX     = -1;       // px relative to chart rect, -1 = none
+    int              hoverX     = -1;       // same coordinate space as `rc` (client px), -1 = none
     int              hoverY     = -1;
     const Theme*     theme      = nullptr;
 };
 
 // Draws the chart into `rc`. `scale` is the DPI factor (1.0 = 96 dpi).
 void DrawChart(Gdiplus::Graphics& g, const Gdiplus::RectF& rc, const ChartInput& in, float scale);
+
+// Where the trend inset is drawn for this input, in the coordinate space of
+// `rc` (for hit-testing/dragging). False when the inset is not shown (off,
+// compare mode, chart too small).
+bool ChartInsetRect(const Gdiplus::RectF& rc, const ChartInput& in, float scale, Gdiplus::RectF& out);
+
+// Converts a desired inset top-left (same space as `rc`) into the clamped
+// fractional position that ChartInsetRect maps back to the same place.
+void ChartInsetFractionFor(const Gdiplus::RectF& rc, const ChartInput& in, float scale,
+                           float px, float py, float& fx, float& fy);
 
 // Font helper shared with the panels: `pt` is a point size at 96 dpi.
 Gdiplus::REAL FontPx(float pt, float scale);

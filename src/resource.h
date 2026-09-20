@@ -9,6 +9,9 @@
 #define IDC_SYMBOL        201
 #define IDC_NAME          202
 #define IDC_HINT          203
+#define IDC_QUERY         204
+#define IDC_SEARCH        205
+#define IDC_RESULTS       206
 
 // "Holding" dialog
 #define IDD_HOLDING       210

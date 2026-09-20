@@ -207,4 +207,44 @@ bool ParseQuoteBatchJson(const char* data, size_t len,
     return true;
 }
 
+bool ParseSearchJson(const char* data, size_t len,
+                     std::array<SearchHit, kMaxSearchHits>& out, size_t& count, std::wstring& err) {
+    assert(data != nullptr);
+    count = 0;
+    if (len == 0) {
+        err = L"Empty response";
+        return false;
+    }
+    const json doc = json::parse(data, data + len, nullptr, false);
+    if (doc.is_discarded()) {
+        err = L"Response is not valid JSON";
+        return false;
+    }
+    const json* quotes = Child(doc, "quotes");
+    if (quotes == nullptr || !quotes->is_array()) {
+        const json* fin  = Child(doc, "finance");
+        const json* ferr = (fin != nullptr) ? Child(*fin, "error") : nullptr;
+        err = (ferr != nullptr) ? L"Provider: " + StrOr(*ferr, "description", L"unknown error")
+                                : L"Response has no quotes block";
+        return false;
+    }
+    const size_t n = min(quotes->size(), kMaxSearchHits);
+    for (size_t i = 0; i < n; ++i) {
+        const json& q = (*quotes)[i];
+        SearchHit& h = out[count];
+        h = SearchHit{};
+        h.symbol = StrOr(q, "symbol", L"");
+        if (h.symbol.empty()) { continue; }
+        h.name = StrOr(q, "longname", L"");
+        if (h.name.empty()) { h.name = StrOr(q, "shortname", L""); }
+        h.exchange = StrOr(q, "exchDisp", L"");
+        if (h.exchange.empty()) { h.exchange = StrOr(q, "exchange", L""); }
+        h.type = StrOr(q, "typeDisp", L"");
+        if (h.type.empty()) { h.type = StrOr(q, "quoteType", L""); }
+        ++count;
+    }
+    assert(count <= kMaxSearchHits);
+    return true;
+}
+
 } // namespace st

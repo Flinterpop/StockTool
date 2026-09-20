@@ -451,13 +451,35 @@ void DrawMessage(Graphics& g, const RectF& rc, const std::wstring& text, const F
 }
 
 // ---------------------------------------------------------------------------
-// Trend inset (top-left corner of the price area)
+// Trend inset (draggable box inside the price area)
 
-void DrawInset(Graphics& g, const Layout& L, const ChartInput& in, const Font& font, const Theme& th, float s) {
+// Geometry shared by drawing, hit-testing and drag mapping. `margin` is the
+// gap kept between the box and the plot edge.
+struct InsetGeom {
+    RectF box;
+    float margin = 0.0f;
+    float freeW  = 0.0f;   // how far the box can travel horizontally
+    float freeH  = 0.0f;
+};
+
+bool InsetGeometry(const Layout& L, const ChartInput& in, float s, InsetGeom& out) {
     const float w = min(190.0f * s, L.price.Width * 0.32f);
     const float h = 70.0f * s;
-    if (w < 60.0f * s || L.price.Height < 3.0f * h) { return; }
-    const RectF box(L.price.X + 8.0f * s, L.price.Y + 8.0f * s, w, h);
+    if (w < 60.0f * s || L.price.Height < 3.0f * h) { return false; }
+    out.margin = 8.0f * s;
+    out.freeW  = max(L.price.Width - w - 2.0f * out.margin, 0.0f);
+    out.freeH  = max(L.price.Height - h - 2.0f * out.margin, 0.0f);
+    const float fx = min(max(in.insetX, 0.0f), 1.0f);
+    const float fy = min(max(in.insetY, 0.0f), 1.0f);
+    out.box = RectF(L.price.X + out.margin + fx * out.freeW, L.price.Y + out.margin + fy * out.freeH, w, h);
+    assert(out.box.X >= L.price.X && out.box.Y >= L.price.Y);
+    return true;
+}
+
+void DrawInset(Graphics& g, const Layout& L, const ChartInput& in, const Font& font, const Theme& th, float s) {
+    InsetGeom geom;
+    if (!InsetGeometry(L, in, s, geom)) { return; }
+    const RectF& box = geom.box;
     SolidBrush bg(th.insetBg);
     Pen        border(th.insetBorder, 1.0f);
     g.FillRectangle(&bg, box);
@@ -658,6 +680,31 @@ void DrawCompare(Graphics& g, const RectF& rc, const ChartInput& in, const Font&
 REAL FontPx(float pt, float scale) {
     assert(pt > 0.0f && scale > 0.0f);
     return pt * scale * (96.0f / 72.0f);
+}
+
+bool ChartInsetRect(const RectF& rc, const ChartInput& in, float scale, RectF& out) {
+    assert(scale > 0.0f);
+    if (!in.opts.inset || in.compare || rc.Width < 40.0f || rc.Height < 40.0f) { return false; }
+    const Layout L = MakeLayout(rc, scale, true, in.opts.rsi);
+    InsetGeom geom;
+    if (!InsetGeometry(L, in, scale, geom)) { return false; }
+    out = geom.box;
+    return true;
+}
+
+void ChartInsetFractionFor(const RectF& rc, const ChartInput& in, float scale,
+                           float px, float py, float& fx, float& fy) {
+    assert(scale > 0.0f);
+    fx = in.insetX;
+    fy = in.insetY;
+    if (rc.Width < 40.0f || rc.Height < 40.0f) { return; }
+    const Layout L = MakeLayout(rc, scale, true, in.opts.rsi);
+    InsetGeom geom;
+    if (!InsetGeometry(L, in, scale, geom)) { return; }
+    fx = (geom.freeW > 0.0f) ? (px - L.price.X - geom.margin) / geom.freeW : 0.0f;
+    fy = (geom.freeH > 0.0f) ? (py - L.price.Y - geom.margin) / geom.freeH : 0.0f;
+    fx = min(max(fx, 0.0f), 1.0f);
+    fy = min(max(fy, 0.0f), 1.0f);
 }
 
 void DrawChart(Graphics& g, const RectF& rc, const ChartInput& in, float scale) {

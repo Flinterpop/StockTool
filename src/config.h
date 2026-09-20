@@ -22,12 +22,13 @@ struct Config {
     size_t       stockCount     = 0;
     unsigned     refreshSeconds = 60;
     size_t       defaultRange   = kRange1Y;  // index into kRanges
-    size_t       insetRange     = kRange1Y;  // 1Y or 5Y trend inset
+    size_t       insetRange     = kRange5Y;  // 1Y or 5Y trend inset
     ThemeMode    theme          = ThemeMode::System;
     bool         startMinimized = false;
     bool         minimizeToTray = false;
     std::wstring urlTemplate;                // chart endpoint
     std::wstring quoteUrlTemplate;           // batch fundamentals endpoint ("" = off)
+    std::wstring searchUrlTemplate;          // symbol search endpoint ("" = off)
     std::wstring path;
 };
 
@@ -44,6 +45,8 @@ struct ViewState {
     bool   bollinger = false;
     bool   rsi       = false;
     bool   inset     = true;
+    float  insetX    = 0.0f;            // inset position, fractions of the free plot space
+    float  insetY    = 0.0f;
     std::wstring selected;              // symbol
 };
 
