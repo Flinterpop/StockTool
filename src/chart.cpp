@@ -572,32 +572,48 @@ size_t IndexAtOrBefore(const Series& s, int64_t t) {
     return static_cast<size_t>((it - 1) - s.pts.begin());
 }
 
-void DrawCompare(Graphics& g, const RectF& rc, const ChartInput& in, const Font& axisFont,
-                 const Font& body, const Theme& th, float s) {
-    const Layout L = MakeLayout(rc, s, false, false);
-    const CompareRange cr = TimeRange(in);
-    if (!cr.ok) {
-        DrawMessage(g, rc, L"Loading…", body, th);
-        return;
-    }
+// Everything the compare base and its hover overlay share.
+struct CompareCtx {
+    Layout           L;
+    CompareRange     cr;
+    PriceScale       sc;
+    const QuoteData* longest = nullptr;   // series used for the date axis
+};
+
+bool CompareContext(const RectF& rc, const ChartInput& in, float s, CompareCtx& out) {
+    out.L  = MakeLayout(rc, s, false, false);
+    out.cr = TimeRange(in);
+    if (!out.cr.ok) { return false; }
     PriceScale sc{ 0.0, 0.0 };
     for (size_t k = 0; k < in.entryCount && k < kMaxStocks; ++k) {
         const QuoteData* d = in.entries[k].data;
         if (d == nullptr || !d->valid || d->series.count < 2) { continue; }
         for (size_t i = 0; i < d->series.count; ++i) { Expand(sc, PctAt(d->series, i)); }
+        if (out.longest == nullptr || d->series.count > out.longest->series.count) { out.longest = d; }
     }
     double pad = (sc.hi - sc.lo) * 0.06;
     if (pad < 0.5) { pad = 0.5; }
     sc.lo -= pad;
     sc.hi += pad;
+    out.sc = sc;
+    assert(out.sc.hi > out.sc.lo);
+    return true;
+}
+
+void DrawCompareBase(Graphics& g, const RectF& rc, const ChartInput& in, const Font& axisFont,
+                     const Font& body, const Theme& th, float s) {
+    CompareCtx c;
+    if (!CompareContext(rc, in, s, c)) {
+        DrawMessage(g, rc, L"Loading…", body, th);
+        return;
+    }
+    const Layout& L = c.L;
+    const CompareRange& cr = c.cr;
+    const PriceScale& sc = c.sc;
+    const QuoteData* longest = c.longest;
     DrawPriceGrid(g, L, sc, axisFont, th, s, true);
 
     // Date ticks from the longest series.
-    const QuoteData* longest = nullptr;
-    for (size_t k = 0; k < in.entryCount && k < kMaxStocks; ++k) {
-        const QuoteData* d = in.entries[k].data;
-        if (d != nullptr && d->valid && (longest == nullptr || d->series.count > longest->series.count)) { longest = d; }
-    }
     if (longest != nullptr && in.range != nullptr) {
         const Series& srs = longest->series;
         const DateStyle style = StyleFor(*in.range, SpanDays(srs));
@@ -651,9 +667,17 @@ void DrawCompare(Graphics& g, const RectF& rc, const ChartInput& in, const Font&
         g.DrawString(label.c_str(), -1, &axisFont, PointF(L.price.X + 22.0f * s, ly), &txt);
         ly += 16.0f * s;
     }
+}
 
-    // Hover: nearest bar at or before the hovered time in each series.
+// Hover: nearest bar at or before the hovered time in each series.
+void DrawCompareOverlay(Graphics& g, const RectF& rc, const ChartInput& in, const Font& axisFont,
+                        const Theme& th, float s) {
     if (in.hoverX < 0) { return; }
+    CompareCtx c;
+    if (!CompareContext(rc, in, s, c)) { return; }
+    const Layout& L = c.L;
+    const CompareRange& cr = c.cr;
+    const QuoteData* longest = c.longest;
     const float fx = static_cast<float>(in.hoverX);
     if (fx < L.price.X || fx > L.price.X + L.price.Width) { return; }
     const double f = (fx - L.price.X) / L.price.Width;
@@ -707,7 +731,41 @@ void ChartInsetFractionFor(const RectF& rc, const ChartInput& in, float scale,
     fy = min(max(fy, 0.0f), 1.0f);
 }
 
-void DrawChart(Graphics& g, const RectF& rc, const ChartInput& in, float scale) {
+namespace {
+
+// Shared by the normal chart's base and overlay. `ok` is false when there is
+// nothing to plot (loading / error / empty), in which case `message` says why.
+struct NormalCtx {
+    Layout       L;
+    PriceScale   sc;
+    float        gridBottom = 0.0f;
+    bool         ok = false;
+    std::wstring message;
+};
+
+NormalCtx NormalContext(const RectF& rc, const ChartInput& in, float s) {
+    NormalCtx c;
+    if (in.data == nullptr) {
+        c.message = L"Loading…";
+        return c;
+    }
+    if (!in.data->valid) {
+        c.message = in.data->error.empty() ? L"No data" : in.data->error;
+        return c;
+    }
+    if (!ComputeScale(in.data->series, in.opts, c.sc)) {
+        c.message = L"No trades in this range";
+        return c;
+    }
+    c.L = MakeLayout(rc, s, true, in.opts.rsi);
+    c.gridBottom = in.opts.rsi ? c.L.rsi.Y + c.L.rsi.Height : c.L.volume.Y + c.L.volume.Height;
+    c.ok = true;
+    return c;
+}
+
+} // namespace
+
+void DrawChartBase(Graphics& g, const RectF& rc, const ChartInput& in, float scale) {
     assert(scale > 0.0f);
     assert(in.range != nullptr);
     assert(in.theme != nullptr);
@@ -717,41 +775,51 @@ void DrawChart(Graphics& g, const RectF& rc, const ChartInput& in, float scale) 
     const Font body     = MakeFont(11.0f, scale);
 
     if (in.compare) {
-        DrawCompare(g, rc, in, axisFont, body, th, scale);
+        DrawCompareBase(g, rc, in, axisFont, body, th, scale);
         return;
     }
-    if (in.data == nullptr) {
-        DrawMessage(g, rc, L"Loading…", body, th);
-        return;
-    }
-    if (!in.data->valid) {
-        DrawMessage(g, rc, in.data->error.empty() ? L"No data" : in.data->error, body, th);
+    const NormalCtx c = NormalContext(rc, in, scale);
+    if (!c.ok) {
+        DrawMessage(g, rc, c.message, body, th);
         return;
     }
     const Series& srs = in.data->series;
-    PriceScale sc;
-    if (!ComputeScale(srs, in.opts, sc)) {
-        DrawMessage(g, rc, L"No trades in this range", body, th);
-        return;
-    }
-
-    const Layout L = MakeLayout(rc, scale, true, in.opts.rsi);
-    const float gridBottom = in.opts.rsi ? L.rsi.Y + L.rsi.Height : L.volume.Y + L.volume.Height;
-    DrawPriceGrid(g, L, sc, axisFont, th, scale, false);
-    DrawDateAxis(g, L, srs, *in.range, in.data->meta.gmtOffsetSec, axisFont, th, scale, gridBottom);
+    const Layout& L = c.L;
+    DrawPriceGrid(g, L, c.sc, axisFont, th, scale, false);
+    DrawDateAxis(g, L, srs, *in.range, in.data->meta.gmtOffsetSec, axisFont, th, scale, c.gridBottom);
 
     g.SetClip(RectF(L.price.X, L.price.Y - 2.0f, L.price.Width, L.price.Height + 4.0f));
-    if (in.opts.candles) { DrawCandles(g, L, srs, sc, th, scale); }
-    else                 { DrawLineSeries(g, L, srs, sc, th, scale); }
-    DrawIndicators(g, L, srs, sc, in.opts, th, scale);
+    if (in.opts.candles) { DrawCandles(g, L, srs, c.sc, th, scale); }
+    else                 { DrawLineSeries(g, L, srs, c.sc, th, scale); }
+    DrawIndicators(g, L, srs, c.sc, in.opts, th, scale);
     g.ResetClip();
 
     DrawVolume(g, L, srs, th);
     if (in.opts.rsi) { DrawRsi(g, L, srs, axisFont, th, scale); }
-    DrawLastPriceTag(g, L, srs, sc, axisFont, th, scale);
+    DrawLastPriceTag(g, L, srs, c.sc, axisFont, th, scale);
     DrawIndicatorLegend(g, L, in.opts, axisFont, th, scale);
     if (in.opts.inset) { DrawInset(g, L, in, axisFont, th, scale); }
-    DrawHover(g, L, in, sc, axisFont, th, scale, gridBottom);
+}
+
+void DrawChartOverlay(Graphics& g, const RectF& rc, const ChartInput& in, float scale) {
+    assert(scale > 0.0f);
+    assert(in.range != nullptr);
+    assert(in.theme != nullptr);
+    if (in.hoverX < 0 || rc.Width < 40.0f || rc.Height < 40.0f) { return; }
+    const Theme& th = *in.theme;
+    const Font axisFont = MakeFont(8.5f, scale);
+    if (in.compare) {
+        DrawCompareOverlay(g, rc, in, axisFont, th, scale);
+        return;
+    }
+    const NormalCtx c = NormalContext(rc, in, scale);
+    if (!c.ok) { return; }
+    DrawHover(g, c.L, in, c.sc, axisFont, th, scale, c.gridBottom);
+}
+
+void DrawChart(Graphics& g, const RectF& rc, const ChartInput& in, float scale) {
+    DrawChartBase(g, rc, in, scale);
+    DrawChartOverlay(g, rc, in, scale);
 }
 
 } // namespace st

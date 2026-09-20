@@ -39,7 +39,13 @@ struct ChartInput {
 };
 
 // Draws the chart into `rc`. `scale` is the DPI factor (1.0 = 96 dpi).
+// DrawChart = DrawChartBase + DrawChartOverlay. The base (everything that
+// does not depend on the mouse) is expensive and can be cached by the
+// caller; the overlay (hover crosshair/tooltip) is cheap and redrawn per
+// mouse move on top of the cached base.
 void DrawChart(Gdiplus::Graphics& g, const Gdiplus::RectF& rc, const ChartInput& in, float scale);
+void DrawChartBase(Gdiplus::Graphics& g, const Gdiplus::RectF& rc, const ChartInput& in, float scale);
+void DrawChartOverlay(Gdiplus::Graphics& g, const Gdiplus::RectF& rc, const ChartInput& in, float scale);
 
 // Where the trend inset is drawn for this input, in the coordinate space of
 // `rc` (for hit-testing/dragging). False when the inset is not shown (off,

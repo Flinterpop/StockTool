@@ -95,10 +95,15 @@ private:
     void Layout();
     void EnsureBackBuffer(HDC hdc, int w, int h);
     void FreeBackBuffer();
+    void PaintChartLayer(Gdiplus::Graphics& g, const ChartInput& in);
+    void RedrawChart();                    // chart content changed: re-render base + repaint
+    void RedrawAll();                      // everything changed
+    void InvalidateListItem(size_t index); // one watch-list row, no erase (no flicker)
     void SelectStock(size_t index);
     void SelectRange(size_t index);
     void RequestChart(bool clearCurrent);
-    void RequestInset();
+    void RequestInset(bool clearCurrent);
+    void PrefetchOthers();                 // background charts/insets for the other tickers
     void RequestAllSummaries();
     void RequestQuotes();
     void RebuildList();
@@ -144,12 +149,21 @@ private:
     HBRUSH    hBgBrush_    = nullptr;
     HBRUSH    hListBrush_  = nullptr;
 
-    // back buffer
+    // back buffer (whole client area)
     HDC     memDC_  = nullptr;
     HBITMAP memBmp_ = nullptr;
     HGDIOBJ oldBmp_ = nullptr;
     int     bufW_   = 0;
     int     bufH_   = 0;
+
+    // cached chart base layer: re-rendered only when chartDirty_ (data,
+    // options, size, theme); the hover overlay is drawn on top per paint
+    HDC     chartDC_    = nullptr;
+    HBITMAP chartBmp_   = nullptr;
+    HGDIOBJ chartOld_   = nullptr;
+    int     chartW_     = 0;
+    int     chartH_     = 0;
+    bool    chartDirty_ = true;
 
     // tray
     NOTIFYICONDATAW tray_{};
@@ -164,8 +178,9 @@ private:
     std::unique_ptr<std::array<QuoteData, kMaxStocks>>  summaries_;
     std::unique_ptr<std::array<QuoteData, kMaxStocks>>  charts_;     // per stock, at range_
     std::array<bool, kMaxStocks>                        chartValid_{};
-    std::unique_ptr<QuoteData>                          inset_;
-    bool                                                insetValid_ = false;
+    std::unique_ptr<std::array<QuoteData, kMaxStocks>>  insets_;     // per stock, at cfg_.insetRange
+    std::array<bool, kMaxStocks>                        insetValid_{};
+    std::unique_ptr<QuoteData>                          incoming_;   // scratch for result copies
     std::unique_ptr<std::array<QuoteStats, kMaxStocks>> quotes_;
     size_t                                              quoteCount_ = 0;
     std::array<AlertState, kMaxStocks>                  alerts_{};

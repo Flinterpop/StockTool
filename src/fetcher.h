@@ -102,10 +102,9 @@ private:
     std::unique_ptr<std::array<QuoteData, kMaxStocks>> charts_;
     std::array<size_t, kMaxStocks>                     chartRange_{};
     std::array<bool, kMaxStocks>                       chartValid_{};
-    std::unique_ptr<QuoteData> inset_;
-    size_t inset_stock_ = 0;
-    size_t inset_range_ = 0;
-    bool   inset_valid_ = false;
+    std::unique_ptr<std::array<QuoteData, kMaxStocks>> insets_;
+    std::array<size_t, kMaxStocks>                     insetRange_{};
+    std::array<bool, kMaxStocks>                       insetValid_{};
     std::unique_ptr<std::array<QuoteStats, kMaxStocks>> quotes_;
     size_t       quoteCount_ = 0;
     std::wstring quoteError_;

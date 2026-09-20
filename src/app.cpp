@@ -77,6 +77,21 @@ bool SameSymbol(const std::wstring& a, const std::wstring& b) {
     return _wcsicmp(a.c_str(), b.c_str()) == 0;
 }
 
+// True when a refreshed fetch would draw exactly what is already on screen,
+// so the (expensive) chart re-render can be skipped.
+bool SameBars(const QuoteData& a, const QuoteData& b) {
+    if (a.valid != b.valid || a.error != b.error) { return false; }
+    if (!a.valid) { return true; }
+    const Series& x = a.series;
+    const Series& y = b.series;
+    if (x.count != y.count || a.meta.price != b.meta.price || a.meta.marketTime != b.meta.marketTime) { return false; }
+    if (x.count == 0) { return true; }
+    const Candle& xl = x.pts[x.count - 1];
+    const Candle& yl = y.pts[y.count - 1];
+    return x.pts[0].time == y.pts[0].time && xl.time == yl.time && xl.close == yl.close &&
+           xl.high == yl.high && xl.low == yl.low && xl.volume == yl.volume;
+}
+
 Font MakeFont(float pt, float scale, INT style = FontStyleRegular) {
     return Font(L"Segoe UI", FontPx(pt, scale), style, UnitPixel);
 }
@@ -87,6 +102,11 @@ App::~App() {
     fetcher_.Stop();
     if (trayAdded_) { Shell_NotifyIconW(NIM_DELETE, &tray_); }
     FreeBackBuffer();
+    if (chartDC_ != nullptr) {
+        SelectObject(chartDC_, chartOld_);
+        DeleteDC(chartDC_);
+    }
+    if (chartBmp_ != nullptr) { DeleteObject(chartBmp_); }
     if (hUiFont_ != nullptr)    { DeleteObject(hUiFont_); }
     if (hBgBrush_ != nullptr)   { DeleteObject(hBgBrush_); }
     if (hListBrush_ != nullptr) { DeleteObject(hListBrush_); }
@@ -117,7 +137,8 @@ bool App::Create(HINSTANCE hInst, int nCmdShow, std::wstring& err) {
     }
     summaries_ = std::make_unique<std::array<QuoteData, kMaxStocks>>();
     charts_    = std::make_unique<std::array<QuoteData, kMaxStocks>>();
-    inset_     = std::make_unique<QuoteData>();
+    insets_    = std::make_unique<std::array<QuoteData, kMaxStocks>>();
+    incoming_  = std::make_unique<QuoteData>();
     quotes_    = std::make_unique<std::array<QuoteStats, kMaxStocks>>();
     theme_     = &ThemeFor(cfg_.theme == ThemeMode::Dark ||
                            (cfg_.theme == ThemeMode::System && SystemPrefersDark()));
@@ -305,7 +326,7 @@ void App::OnCreate() {
     RequestAllSummaries();
     RequestQuotes();
     RequestChart(true);
-    RequestInset();
+    RequestInset(true);
     SetTimer(hwnd_, kRefreshTimer, cfg_.refreshSeconds * 1000u, nullptr);
     SetStatus(L"Loading " + std::to_wstring(cfg_.stockCount) + L" symbols from " + cfg_.path);
 }
@@ -459,6 +480,7 @@ void App::ApplyTheme() {
     for (HWND h : hRangeBtns_) {
         if (h != nullptr) { SetWindowTheme(h, sub, nullptr); }
     }
+    chartDirty_ = true;
     RedrawWindow(hwnd_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
 }
 
@@ -495,7 +517,7 @@ void App::SyncViewMenu() {
 void App::ToggleOption(bool& flag) {
     flag = !flag;
     SyncViewMenu();
-    InvalidateRect(hwnd_, &chartRect_, FALSE);
+    RedrawChart();
 }
 
 // ---------------------------------------------------------------------------
@@ -517,7 +539,7 @@ void App::RequestChart(bool clearCurrent) {
     assert(range_ < kRanges.size());
     if (clearCurrent) {
         chartValid_[selected_] = false;
-        InvalidateRect(hwnd_, &chartRect_, FALSE);
+        RedrawChart();
     }
     if (!fetcher_.Enqueue(JobKind::Chart, selected_, range_)) { SetStatus(L"Fetch queue is full"); }
     if (state_.compare) {
@@ -527,10 +549,23 @@ void App::RequestChart(bool clearCurrent) {
     }
 }
 
-void App::RequestInset() {
+void App::RequestInset(bool clearCurrent) {
     if (!state_.inset) { return; }
-    insetValid_ = false;
+    if (clearCurrent) {
+        insetValid_[selected_] = false;
+        RedrawChart();
+    }
     if (!fetcher_.Enqueue(JobKind::Inset, selected_, cfg_.insetRange)) { SetStatus(L"Fetch queue is full"); }
+}
+
+// Warms the caches for every other ticker so switching is instant. Runs
+// after the selected ticker's own data has arrived, so it never delays it.
+void App::PrefetchOthers() {
+    for (size_t i = 0; i < cfg_.stockCount; ++i) {
+        if (i == selected_) { continue; }
+        if (!chartValid_[i]) { fetcher_.Enqueue(JobKind::Chart, i, range_); }
+        if (state_.inset && !insetValid_[i]) { fetcher_.Enqueue(JobKind::Inset, i, cfg_.insetRange); }
+    }
 }
 
 void App::SelectStock(size_t index) {
@@ -539,9 +574,10 @@ void App::SelectStock(size_t index) {
     if (static_cast<size_t>(SendMessageW(hList_, LB_GETCURSEL, 0, 0)) != index) {
         SendMessageW(hList_, LB_SETCURSEL, static_cast<WPARAM>(index), 0);
     }
+    // Cached data shows immediately; a silent refresh is queued behind it.
     RequestChart(!chartValid_[index]);
-    RequestInset();
-    InvalidateRect(hwnd_, nullptr, FALSE);
+    RequestInset(!insetValid_[index]);
+    RedrawAll();
 }
 
 void App::SelectRange(size_t index) {
@@ -549,6 +585,23 @@ void App::SelectRange(size_t index) {
     range_ = index;
     for (size_t i = 0; i < kMaxStocks; ++i) { chartValid_[i] = false; }
     RequestChart(true);
+}
+
+void App::RedrawChart() {
+    chartDirty_ = true;
+    InvalidateRect(hwnd_, &chartRect_, FALSE);
+}
+
+void App::RedrawAll() {
+    chartDirty_ = true;
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void App::InvalidateListItem(size_t index) {
+    RECT rc{};
+    if (SendMessageW(hList_, LB_GETITEMRECT, static_cast<WPARAM>(index), reinterpret_cast<LPARAM>(&rc)) != LB_ERR) {
+        InvalidateRect(hList_, &rc, FALSE);   // the item paints its own background
+    }
 }
 
 void App::SetStatus(const std::wstring& text) {
@@ -714,6 +767,7 @@ bool App::AddTicker(const StockEntry& entry, std::wstring& err) {
     ++cfg_.stockCount;
     (*summaries_)[index] = QuoteData{};
     chartValid_[index]   = false;
+    insetValid_[index]   = false;
     alerts_[index]       = AlertState{};
     SendMessageW(hList_, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(entry.symbol.c_str()));
 
@@ -767,8 +821,8 @@ bool App::ApplyTickerEdit(size_t index, const StockEntry& edited, std::wstring& 
     if (symbolChanged) {
         (*summaries_)[index] = QuoteData{};
         chartValid_[index]   = false;
+        insetValid_[index]   = false;
         alerts_[index]       = AlertState{};
-        if (index == selected_) { insetValid_ = false; }
     }
     RebuildList();
     fetcher_.UpdateConfig(cfg_);
@@ -776,7 +830,7 @@ bool App::ApplyTickerEdit(size_t index, const StockEntry& edited, std::wstring& 
     RequestQuotes();
     SelectStock(index);
     Layout();
-    InvalidateRect(hwnd_, nullptr, TRUE);
+    RedrawAll();
     SetStatus(symbolChanged ? old.symbol + L" is now " + e.symbol : L"Renamed " + e.symbol);
     return true;
 }
@@ -800,12 +854,15 @@ void App::OnRemoveTicker() {
         (*summaries_)[i]   = (*summaries_)[i + 1];
         (*charts_)[i]      = (*charts_)[i + 1];
         chartValid_[i]     = chartValid_[i + 1];
+        (*insets_)[i]      = (*insets_)[i + 1];
+        insetValid_[i]     = insetValid_[i + 1];
         alerts_[i]         = alerts_[i + 1];
     }
     --cfg_.stockCount;
     cfg_.stocks[cfg_.stockCount]   = StockEntry{};
     (*summaries_)[cfg_.stockCount] = QuoteData{};
     chartValid_[cfg_.stockCount]   = false;
+    insetValid_[cfg_.stockCount]   = false;
     SendMessageW(hList_, LB_DELETESTRING, static_cast<WPARAM>(index), 0);
 
     fetcher_.UpdateConfig(cfg_);
@@ -832,6 +889,8 @@ void App::OnMoveTicker(int delta) {
     std::swap((*summaries_)[i], (*summaries_)[j]);
     std::swap((*charts_)[i], (*charts_)[j]);
     std::swap(chartValid_[i], chartValid_[j]);
+    std::swap((*insets_)[i], (*insets_)[j]);
+    std::swap(insetValid_[i], insetValid_[j]);
     std::swap(alerts_[i], alerts_[j]);
     selected_ = j;
     RebuildList();
@@ -853,7 +912,7 @@ void App::OnEditHolding() {
     e.holding = h;
     fetcher_.UpdateConfig(cfg_);
     Layout();
-    InvalidateRect(hwnd_, nullptr, TRUE);
+    RedrawAll();
     SetStatus((h.qty > 0.0) ? L"Holding saved for " + e.symbol : L"Holding cleared for " + e.symbol);
 }
 
@@ -871,7 +930,7 @@ void App::OnEditAlerts() {
     alerts_[selected_] = AlertState{};
     fetcher_.UpdateConfig(cfg_);
     CheckAlerts(selected_, ComputeChange((*summaries_)[selected_]));
-    InvalidateRect(hList_, nullptr, TRUE);
+    InvalidateListItem(selected_);
     SetStatus(L"Alerts saved for " + e.symbol);
 }
 
@@ -895,6 +954,7 @@ void App::OnReloadConfig() {
     for (size_t i = 0; i < kMaxStocks; ++i) {
         (*summaries_)[i] = QuoteData{};
         chartValid_[i]   = false;
+        insetValid_[i]   = false;
         alerts_[i]       = AlertState{};
     }
     quoteCount_ = 0;
@@ -923,7 +983,7 @@ void App::OnSize(WPARAM wp) {
         return;
     }
     Layout();
-    InvalidateRect(hwnd_, nullptr, FALSE);
+    RedrawAll();
 }
 
 void App::OnCommand(int id, UINT code) {
@@ -949,7 +1009,7 @@ void App::OnCommand(int id, UINT code) {
     case IDM_SMA50:     ToggleOption(state_.sma50); break;
     case IDM_BOLLINGER: ToggleOption(state_.bollinger); break;
     case IDM_RSI:       ToggleOption(state_.rsi); break;
-    case IDM_INSET:     ToggleOption(state_.inset); RequestInset(); break;
+    case IDM_INSET:     ToggleOption(state_.inset); RequestInset(false); break;
     case IDM_THEME_SYSTEM: SetThemeMode(ThemeMode::System); break;
     case IDM_THEME_LIGHT:  SetThemeMode(ThemeMode::Light); break;
     case IDM_THEME_DARK:   SetThemeMode(ThemeMode::Dark); break;
@@ -1008,7 +1068,7 @@ void App::OnTimer() {
     RequestAllSummaries();
     RequestQuotes();
     RequestChart(false);
-    if (state_.inset && !insetValid_) { RequestInset(); }
+    RequestInset(false);
 }
 
 void App::OnMouseMove(int x, int y, bool buttonDown) {
@@ -1025,7 +1085,7 @@ void App::OnMouseMove(int x, int y, bool buttonDown) {
         if (fx != state_.insetX || fy != state_.insetY) {
             state_.insetX = fx;
             state_.insetY = fy;
-            InvalidateRect(hwnd_, &chartRect_, FALSE);
+            RedrawChart();
         }
         return;
     }
@@ -1066,7 +1126,7 @@ void App::OnDpiChanged(WPARAM wp, LPARAM lp) {
     SetWindowPos(hwnd_, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top,
                  SWP_NOZORDER | SWP_NOACTIVATE);
     Layout();
-    InvalidateRect(hwnd_, nullptr, FALSE);
+    RedrawAll();
 }
 
 void App::OnSettingChange(LPARAM lp) {
@@ -1103,7 +1163,7 @@ void App::OnSummaryReady(size_t stock) {
     else         { SetStatus(cfg_.stocks[stock].symbol + L": " + q.error); }
     CheckAlerts(stock, ComputeChange(q));
     UpdateTrayTip();
-    InvalidateRect(hList_, nullptr, TRUE);
+    InvalidateListItem(stock);
     if (ComputePortfolio().any) {
         if (portfolioRect_.bottom == portfolioRect_.top) { Layout(); }
         InvalidateRect(hwnd_, &portfolioRect_, FALSE);
@@ -1116,26 +1176,31 @@ void App::OnSummaryReady(size_t stock) {
 
 void App::OnChartReady(size_t stock, size_t range) {
     if (stock >= cfg_.stockCount || range != range_) { return; }  // stale
+    QuoteData& fresh = *incoming_;
+    if (!fetcher_.CopyChart(stock, range, fresh)) { return; }
+    if (!SameSymbol(fresh.symbol, cfg_.stocks[stock].symbol)) { return; }  // list changed meanwhile
     QuoteData& q = (*charts_)[stock];
-    if (!fetcher_.CopyChart(stock, range, q)) { return; }
-    if (!SameSymbol(q.symbol, cfg_.stocks[stock].symbol)) {
-        q = QuoteData{};  // fetched before the list changed; a fresh request is queued
-        return;
-    }
+    const bool changed = !chartValid_[stock] || !SameBars(q, fresh);
+    if (changed) { q = fresh; }
     chartValid_[stock] = true;
     if (stock == selected_ && !q.valid) { SetStatus(cfg_.stocks[stock].symbol + L": " + q.error); }
-    if (stock == selected_ || state_.compare) { InvalidateRect(hwnd_, &chartRect_, FALSE); }
+    if (changed && (stock == selected_ || state_.compare)) { RedrawChart(); }
+    if (stock == selected_) { PrefetchOthers(); }
 }
 
 void App::OnInsetReady(size_t stock, size_t range) {
-    if (stock != selected_ || range != cfg_.insetRange) { return; }
-    if (!fetcher_.CopyInset(stock, range, *inset_)) { return; }
-    if (!SameSymbol(inset_->symbol, cfg_.stocks[stock].symbol)) {
-        *inset_ = QuoteData{};
-        return;
+    if (stock >= cfg_.stockCount || range != cfg_.insetRange) { return; }
+    QuoteData& fresh = *incoming_;
+    if (!fetcher_.CopyInset(stock, range, fresh)) { return; }
+    if (!SameSymbol(fresh.symbol, cfg_.stocks[stock].symbol)) { return; }
+    QuoteData& q = (*insets_)[stock];
+    const bool changed = !insetValid_[stock] || !SameBars(q, fresh);
+    if (changed) { q = fresh; }
+    insetValid_[stock] = true;
+    if (stock == selected_) {
+        if (changed) { RedrawChart(); }
+        PrefetchOthers();
     }
-    insetValid_ = true;
-    InvalidateRect(hwnd_, &chartRect_, FALSE);
 }
 
 void App::OnQuoteReady() {
@@ -1159,7 +1224,7 @@ ChartInput App::BuildChartInput() {
     in.opts.bollinger = state_.bollinger;
     in.opts.rsi       = state_.rsi;
     in.opts.inset     = state_.inset;
-    in.inset          = insetValid_ ? inset_.get() : nullptr;
+    in.inset          = insetValid_[selected_] ? &(*insets_)[selected_] : nullptr;
     in.insetLabel     = kRanges[cfg_.insetRange].label;
     in.insetX         = state_.insetX;
     in.insetY         = state_.insetY;
@@ -1204,7 +1269,7 @@ void App::OnLButtonUp(int x, int y) {
     dragging_ = false;
     if (GetCapture() == hwnd_) { ReleaseCapture(); }
     SaveState();   // remember the new spot right away
-    InvalidateRect(hwnd_, &chartRect_, FALSE);
+    RedrawChart();
 }
 
 bool App::OnSetCursor() {
@@ -1245,6 +1310,41 @@ void App::FreeBackBuffer() {
     bufH_ = 0;
 }
 
+// Blits the cached chart base (re-rendering it first if anything but the
+// mouse changed) and draws the hover overlay on top.
+void App::PaintChartLayer(Graphics& g, const ChartInput& in) {
+    const int w = chartRect_.right - chartRect_.left;
+    const int h = chartRect_.bottom - chartRect_.top;
+    if (w <= 0 || h <= 0) { return; }
+    if (chartDC_ == nullptr || chartW_ != w || chartH_ != h) {
+        if (chartDC_ != nullptr) {
+            SelectObject(chartDC_, chartOld_);
+            DeleteDC(chartDC_);
+            chartDC_ = nullptr;
+        }
+        if (chartBmp_ != nullptr) { DeleteObject(chartBmp_); }
+        chartDC_  = CreateCompatibleDC(memDC_);
+        chartBmp_ = CreateCompatibleBitmap(memDC_, w, h);
+        assert(chartDC_ != nullptr && chartBmp_ != nullptr);
+        chartOld_ = SelectObject(chartDC_, chartBmp_);
+        chartW_ = w;
+        chartH_ = h;
+        chartDirty_ = true;
+    }
+    if (chartDirty_) {
+        Graphics cg(chartDC_);
+        cg.SetSmoothingMode(SmoothingModeAntiAlias);
+        cg.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
+        cg.Clear(theme_->bg);
+        DrawChartBase(cg, RectF(0.0f, 0.0f, static_cast<REAL>(w), static_cast<REAL>(h)), in, scale_);
+        chartDirty_ = false;
+    }
+    const HDC hdc = g.GetHDC();
+    BitBlt(hdc, chartRect_.left, chartRect_.top, w, h, chartDC_, 0, 0, SRCCOPY);
+    g.ReleaseHDC(hdc);
+    DrawChartOverlay(g, ToRectF(chartRect_), in, scale_);
+}
+
 void App::OnPaint() {
     PAINTSTRUCT ps{};
     HDC hdc = BeginPaint(hwnd_, &ps);
@@ -1262,8 +1362,7 @@ void App::OnPaint() {
             PaintHeader(g);
             PaintPortfolio(g);
 
-            const ChartInput in = BuildChartInput();
-            DrawChart(g, ToRectF(chartRect_), in, scale_);
+            PaintChartLayer(g, BuildChartInput());
             PaintStats(g);
             PaintStatus(g);
         }

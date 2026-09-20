@@ -44,7 +44,7 @@ bool Fetcher::Start(HWND notify, const Config& cfg, std::wstring& err) {
     scratch_   = std::make_unique<QuoteData>();
     summaries_ = std::make_unique<std::array<QuoteData, kMaxStocks>>();
     charts_    = std::make_unique<std::array<QuoteData, kMaxStocks>>();
-    inset_     = std::make_unique<QuoteData>();
+    insets_    = std::make_unique<std::array<QuoteData, kMaxStocks>>();
     quotes_    = std::make_unique<std::array<QuoteStats, kMaxStocks>>();
     search_    = std::make_unique<std::array<SearchHit, kMaxSearchHits>>();
     stop_      = false;
@@ -249,10 +249,9 @@ void Fetcher::Process(const FetchJob& job) {
             msg = WM_APP_CHART_READY;
             break;
         case JobKind::Inset:
-            *inset_      = *scratch_;
-            inset_stock_ = job.stock;
-            inset_range_ = job.range;
-            inset_valid_ = true;
+            (*insets_)[job.stock]  = *scratch_;
+            insetRange_[job.stock] = job.range;
+            insetValid_[job.stock] = true;
             msg = WM_APP_INSET_READY;
             break;
         case JobKind::Quote:
@@ -374,10 +373,11 @@ bool Fetcher::CopyChart(size_t stock, size_t range, QuoteData& out) {
 }
 
 bool Fetcher::CopyInset(size_t stock, size_t range, QuoteData& out) {
-    if (!inset_) { return false; }
+    assert(stock < kMaxStocks);
+    if (stock >= kMaxStocks || !insets_) { return false; }
     std::lock_guard<std::mutex> lock(dataMutex_);
-    if (!inset_valid_ || inset_stock_ != stock || inset_range_ != range) { return false; }
-    out = *inset_;
+    if (!insetValid_[stock] || insetRange_[stock] != range) { return false; }
+    out = (*insets_)[stock];
     return true;
 }
 

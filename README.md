@@ -85,6 +85,7 @@ Notes:
 - The fundamentals endpoint needs a session cookie and a "crumb"; the worker obtains both on first use and retries once with a fresh crumb on 401/403. If the provider changes this, fundamentals show `-` and the status line says why; the chart still works.
 - Day change is derived from the daily bars: if the newest bar is today's, previous close is the bar before it; otherwise the newest bar is the previous close.
 - Alerts fire once when the price crosses the level (tray balloon + status line + amber row), and re-arm when it crosses back.
+- Charts and trend insets are cached per ticker and prefetched in the background after the selected ticker loads, so switching tickers is instant; a selection also queues a silent refresh, which only repaints if the data actually changed. The rendered chart is kept in its own bitmap and only the hover crosshair is redrawn per mouse move.
 - Per-monitor DPI v2 aware; everything is laid out from a DPI scale factor. Dark mode covers the client area, title bar and buttons; the Win32 menu bar and dialogs stay light.
 - Written to the NASA/JPL Power of 10 style: fixed-size arrays (`kMaxStocks`, `kMaxPoints`), bounded loops, asserts on preconditions, no recursion, warnings as errors. The only unbounded loops are the message pump and the worker's service loop, both of which end on shutdown.
 
