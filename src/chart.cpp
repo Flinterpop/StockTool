@@ -5,6 +5,7 @@
 
 #include <cassert>
 #include <cmath>
+#include <limits>
 
 namespace st {
 namespace {
@@ -295,10 +296,12 @@ void DrawIndicators(Graphics& g, const Layout& L, const Series& srs, const Price
     }
 }
 
-void DrawIndicatorLegend(Graphics& g, const Layout& L, const ChartOptions& o, const Font& font,
+void DrawIndicatorLegend(Graphics& g, const Layout& L, const ChartInput& in, const Font& font,
                          const Theme& th, float s) {
+    const ChartOptions& o = in.opts;
     struct Item { bool on; const wchar_t* label; const Color* col; };
     const Item items[] = {
+        { o.benchmark && in.bench != nullptr, in.benchLabel != nullptr ? in.benchLabel : L"benchmark", &th.textMuted },
         { o.sma20,     L"SMA 20",     &th.sma20 },
         { o.sma50,     L"SMA 50",     &th.sma50 },
         { o.bollinger, L"Bollinger 20/2", &th.bandEdge },
@@ -383,6 +386,32 @@ double DividendOnBar(const QuoteData& d, size_t idx) {
         if (BarForTime(d.series, d.dividends[k].time) == idx) { total += d.dividends[k].amount; }
     }
     return total;
+}
+
+// Benchmark close on or before the stock's bar `i`, rebased so the two
+// start at the same price. NaN when the benchmark has no bar that early.
+double BenchRebased(const ChartInput& in, size_t i) {
+    const QuoteData* b = in.bench;
+    if (b == nullptr || !b->valid || in.data == nullptr) { return std::numeric_limits<double>::quiet_NaN(); }
+    const Series& s  = in.data->series;
+    const Series& bs = b->series;
+    if (s.count < 2 || bs.count < 2) { return std::numeric_limits<double>::quiet_NaN(); }
+    const size_t j0 = BarForTime(bs, s.pts[0].time);
+    const size_t j  = BarForTime(bs, s.pts[i].time);
+    if (j0 >= kMaxPoints || j >= kMaxPoints) { return std::numeric_limits<double>::quiet_NaN(); }
+    const double base = bs.pts[j0].close;
+    if (base <= 0.0) { return std::numeric_limits<double>::quiet_NaN(); }
+    return s.pts[0].close * bs.pts[j].close / base;
+}
+
+void DrawBenchmark(Graphics& g, const Layout& L, const ChartInput& in, const PriceScale& sc,
+                   const Theme& th, float s) {
+    const size_t n = min(in.data->series.count, kMaxPoints);
+    Track t;
+    for (size_t i = 0; i < kMaxPoints; ++i) { t[i] = (i < n) ? BenchRebased(in, i) : std::numeric_limits<double>::quiet_NaN(); }
+    Pen pen(th.textMuted, 1.5f * s);
+    pen.SetDashStyle(DashStyleDash);
+    DrawTrack(g, L.price, t, n, sc, pen);
 }
 
 // Small markers along the bottom of the price plot on ex-dividend bars.
@@ -477,6 +506,14 @@ void DrawHover(Graphics& g, const Layout& L, const ChartInput& in, const PriceSc
     tip += L"\nVol " + FormatVolume(c.volume);
     const double div = DividendOnBar(*in.data, idx);
     if (div > 0.0) { tip += L"\nDividend " + FormatPrice(div) + L" (ex-date)"; }
+    if (in.opts.benchmark && in.bench != nullptr) {
+        const double b = BenchRebased(in, idx);
+        const double first = srs.pts[0].close;
+        if (std::isfinite(b) && first > 0.0) {
+            tip += L"\n" + std::wstring(in.benchLabel != nullptr ? in.benchLabel : L"Benchmark") + L" " +
+                   FormatPct((b - first) / first * 100.0) + L" vs " + FormatPct((c.close - first) / first * 100.0);
+        }
+    }
     if (in.opts.rsi && n > kRsiPeriod) {
         Track t;
         Rsi(srs, kRsiPeriod, t);
@@ -800,6 +837,13 @@ NormalCtx NormalContext(const RectF& rc, const ChartInput& in, float s) {
         c.message = L"No trades in this range";
         return c;
     }
+    if (in.opts.benchmark && in.bench != nullptr) {
+        // Widen the scale so a rebased benchmark that outruns the stock stays visible.
+        PriceScale raw{ c.sc.lo, c.sc.hi };
+        const size_t n = min(in.data->series.count, kMaxPoints);
+        for (size_t i = 0; i < n; ++i) { Expand(raw, BenchRebased(in, i)); }
+        c.sc = raw;
+    }
     c.L = MakeLayout(rc, s, true, in.opts.rsi);
     c.gridBottom = in.opts.rsi ? c.L.rsi.Y + c.L.rsi.Height : c.L.volume.Y + c.L.volume.Height;
     c.ok = true;
@@ -835,13 +879,14 @@ void DrawChartBase(Graphics& g, const RectF& rc, const ChartInput& in, float sca
     if (in.opts.candles) { DrawCandles(g, L, srs, c.sc, th, scale); }
     else                 { DrawLineSeries(g, L, srs, c.sc, th, scale); }
     DrawIndicators(g, L, srs, c.sc, in.opts, th, scale);
+    if (in.opts.benchmark && in.bench != nullptr) { DrawBenchmark(g, L, in, c.sc, th, scale); }
     g.ResetClip();
 
     DrawVolume(g, L, srs, th);
     if (in.opts.rsi) { DrawRsi(g, L, srs, axisFont, th, scale); }
     DrawDividendMarkers(g, L, *in.data, axisFont, th, scale);
     DrawLastPriceTag(g, L, srs, c.sc, axisFont, th, scale);
-    DrawIndicatorLegend(g, L, in.opts, axisFont, th, scale);
+    DrawIndicatorLegend(g, L, in, axisFont, th, scale);
     if (in.opts.inset) { DrawInset(g, L, in, axisFont, th, scale); }
 }
 

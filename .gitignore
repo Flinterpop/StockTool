@@ -12,6 +12,7 @@
 !/src/*.h
 !/src/*.rc
 !/src/*.ico
+!/src/*.rtf
 !/cmake/
 !/cmake/*.cmake
 !/tools/

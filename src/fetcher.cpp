@@ -5,6 +5,7 @@
 #include <process.h>
 
 #include <cassert>
+#include <ctime>
 
 namespace st {
 namespace {
@@ -48,7 +49,10 @@ bool Fetcher::Start(HWND notify, const Config& cfg, std::wstring& err) {
     quotes_    = std::make_unique<std::array<QuoteStats, kMaxStocks>>();
     search_    = std::make_unique<std::array<SearchHit, kMaxSearchHits>>();
     news_      = std::make_unique<std::array<NewsSlot, kMaxStocks>>();
+    bench_     = std::make_unique<QuoteData>();
     stop_      = false;
+    static constexpr const wchar_t* kNames[kEndpointCount] = { L"chart", L"fundamentals", L"search", L"fx", L"news", L"crumb" };
+    for (size_t i = 0; i < kEndpointCount; ++i) { health_.endpoints[i].name = kNames[i]; }
 
     unsigned id = 0;
     const uintptr_t h = _beginthreadex(nullptr, 0, &Fetcher::ThreadEntry, this, 0, &id);
@@ -92,6 +96,7 @@ void Fetcher::Run() {
         case JobKind::Search: ProcessSearch(job); break;
         case JobKind::Fx:     ProcessFx(job); break;
         case JobKind::News:   ProcessNews(job); break;
+        case JobKind::Bench:  ProcessBench(job); break;
         default:              Process(job); break;
         }
     }
@@ -145,14 +150,24 @@ bool Fetcher::Enqueue(JobKind kind, size_t stock, size_t range) {
     const bool kindOk = kind == JobKind::Summary || kind == JobKind::Chart ||
                         kind == JobKind::Inset || kind == JobKind::News;
     if (!kindOk || stock >= cfg_.stockCount || range >= kRanges.size()) { return false; }
-    if (kind == JobKind::News && cfg_.newsUrlTemplate.empty()) { return false; }
+    if (kind == JobKind::News && cfg_.newsSource == NewsSource::None) { return false; }
     FetchJob job;
     job.kind   = kind;
     job.stock  = stock;
     job.range  = range;
     job.symbol = cfg_.stocks[stock].symbol;
-    if (kind == JobKind::News) {
+    if (kind == JobKind::News && cfg_.newsSource == NewsSource::Google) {
+        // Search by company name when we have one; a bare symbol like "TD"
+        // matches far too much. Quoted so the phrase must appear.
+        const StockEntry& e = cfg_.stocks[stock];
+        const bool haveName = !e.name.empty() && _wcsicmp(e.name.c_str(), e.symbol.c_str()) != 0;
+        const std::wstring query = haveName ? L"\"" + e.name + L"\"" : e.symbol;
+        job.url = cfg_.newsRssTemplate;
+        job.aux = L"rss";
+        ReplaceAll(job.url, L"{query}", UrlEncode(query));
+    } else if (kind == JobKind::News) {
         job.url = cfg_.newsUrlTemplate;
+        job.aux = L"json";
         ReplaceAll(job.url, L"{symbol}", UrlEncode(job.symbol));
     } else {
         const RangeSpec& spec = (kind == JobKind::Summary) ? kSummarySpec : kRanges[range];
@@ -214,6 +229,18 @@ bool Fetcher::EnqueueFx(const std::wstring& from, const std::wstring& to) {
     return Push(job, false);
 }
 
+bool Fetcher::EnqueueBench(size_t range) {
+    assert(thread_ != nullptr);
+    assert(range < kRanges.size());
+    if (cfg_.benchmark.empty() || range >= kRanges.size()) { return false; }
+    FetchJob job;
+    job.kind   = JobKind::Bench;
+    job.range  = range;
+    job.symbol = cfg_.benchmark;
+    job.url    = BuildUrl(job.symbol, kRanges[range]);
+    return Push(job, false);
+}
+
 std::wstring Fetcher::BuildUrl(const std::wstring& symbol, const RangeSpec& spec) const {
     assert(!symbol.empty());
     std::wstring url = cfg_.urlTemplate;
@@ -232,13 +259,14 @@ bool Fetcher::Fetch(const std::wstring& url, QuoteData& out) {
     HttpResult   res;
     std::wstring err;
     out = QuoteData{};
-    if (!http_.Get(url, buf_.get(), kHttpBufSize, res, err)) {
+    if (!Get(Endpoint::Chart, url, res, err)) {
         out.error = err;
         return false;
     }
     // Non-200 replies usually still carry a JSON error description.
     if (!ParseChartJson(buf_.get(), res.length, out, err)) {
         out.error = (res.status == 200) ? err : L"HTTP " + std::to_wstring(res.status) + L": " + err;
+        Record(Endpoint::Chart, false, res, out.error);
         return false;
     }
     assert(out.valid);
@@ -287,7 +315,7 @@ bool Fetcher::EnsureCrumb(std::wstring& err) {
     HttpResult res;
     // Any status is fine here; the point is the Set-Cookie the session keeps.
     if (!http_.Get(kCookieUrl, buf_.get(), kHttpBufSize, res, err)) { return false; }
-    if (!http_.Get(kCrumbUrl, buf_.get(), kHttpBufSize, res, err)) { return false; }
+    if (!Get(Endpoint::Crumb, kCrumbUrl, res, err)) { return false; }
     if (res.status != 200 || res.length == 0 || res.length > 64) {
         err = L"crumb request returned HTTP " + std::to_wstring(res.status);
         return false;
@@ -319,7 +347,7 @@ void Fetcher::ProcessQuote(const FetchJob& job) {
         std::wstring url = job.url;
         ReplaceAll(url, L"{crumb}", UrlEncode(crumb_));
         HttpResult res;
-        if (!http_.Get(url, buf_.get(), kHttpBufSize, res, err)) { break; }
+        if (!Get(Endpoint::Quote, url, res, err)) { break; }
         if (res.status == 401 || res.status == 403) {
             crumb_.clear();
             err = L"HTTP " + std::to_wstring(res.status) + L" from fundamentals endpoint";
@@ -344,7 +372,7 @@ void Fetcher::ProcessSearch(const FetchJob& job) {
     std::wstring err;
     size_t       count = 0;
     HttpResult   res;
-    bool ok = http_.Get(job.url, buf_.get(), kHttpBufSize, res, err);
+    bool ok = Get(Endpoint::Search, job.url, res, err);
     {
         std::lock_guard<std::mutex> lock(dataMutex_);
         if (ok) {
@@ -369,6 +397,10 @@ void Fetcher::ProcessFx(const FetchJob& job) {
     r.from = job.aux.substr(0, bar);
     r.to   = job.aux.substr(bar + 1);
     const bool ok = Fetch(job.url, *scratch_);
+    {
+        HttpResult none;
+        Record(Endpoint::Fx, ok, none, ok ? L"" : scratch_->error);
+    }
     if (ok && scratch_->meta.price > 0.0) {
         r.rate  = scratch_->meta.price;
         r.valid = true;
@@ -401,12 +433,13 @@ void Fetcher::ProcessNews(const FetchJob& job) {
     std::wstring err;
     size_t       count = 0;
     HttpResult   res;
-    bool ok = http_.Get(job.url, buf_.get(), kHttpBufSize, res, err);
+    bool ok = Get(Endpoint::News, job.url, res, err);
     {
         std::lock_guard<std::mutex> lock(dataMutex_);
         NewsSlot& slot = (*news_)[job.stock];
         if (ok) {
-            ok = ParseNewsJson(buf_.get(), res.length, slot.items, count, err);
+            ok = (job.aux == L"rss") ? ParseNewsRss(buf_.get(), res.length, slot.items, count, err)
+                                     : ParseNewsJson(buf_.get(), res.length, slot.items, count, err);
             if (!ok && res.status != 200) { err = L"HTTP " + std::to_wstring(res.status) + L": " + err; }
         }
         slot.count  = ok ? count : 0;
@@ -417,6 +450,96 @@ void Fetcher::ProcessNews(const FetchJob& job) {
     const BOOL posted = PostMessageW(notify_, WM_APP_NEWS_READY, static_cast<WPARAM>(job.stock), 0);
     assert(posted);
     (void)posted;
+}
+
+void Fetcher::ProcessBench(const FetchJob& job) {
+    assert(job.kind == JobKind::Bench && !job.url.empty());
+    const bool ok = Fetch(job.url, *scratch_);
+    (void)ok;
+    scratch_->symbol = job.symbol;
+    {
+        std::lock_guard<std::mutex> lock(dataMutex_);
+        *bench_     = *scratch_;
+        benchRange_ = job.range;
+        benchValid_ = true;
+    }
+    const BOOL posted = PostMessageW(notify_, WM_APP_BENCH_READY, 0, static_cast<LPARAM>(job.range));
+    assert(posted);
+    (void)posted;
+}
+
+// A GET that honours the provider's rate limiting and keeps the health
+// table current. HTTP 429 starts a pause that doubles on repeats (1, 2, 4,
+// 8 minutes, capped) and clears on the next success.
+bool Fetcher::Get(Endpoint ep, const std::wstring& url, HttpResult& res, std::wstring& err) {
+    std::wstring why;
+    if (InBackoff(why)) {
+        err = why;
+        res = HttpResult{};
+        return false;
+    }
+    const bool ok = http_.Get(url, buf_.get(), kHttpBufSize, res, err);
+    if (ok && res.status == 429) {
+        const int64_t now = static_cast<int64_t>(_time64(nullptr));
+        backoffSteps_ = (backoffSteps_ < 3) ? backoffSteps_ + 1 : 3;
+        const int64_t seconds = 60 * (1 << (backoffSteps_ - 1));
+        err = L"rate limited (HTTP 429); pausing " + std::to_wstring(seconds / 60) + L" min";
+        {
+            std::lock_guard<std::mutex> lock(dataMutex_);
+            health_.backoffUntil = now + seconds;
+        }
+        Record(ep, false, res, err);
+        const BOOL posted = PostMessageW(notify_, WM_APP_BACKOFF, static_cast<WPARAM>(seconds), 0);
+        (void)posted;
+        return false;
+    }
+    Record(ep, ok && res.status < 400, res, ok ? (res.status < 400 ? L"" : L"HTTP " + std::to_wstring(res.status)) : err);
+    if (ok && res.status < 400) { backoffSteps_ = 0; }
+    return ok;
+}
+
+bool Fetcher::InBackoff(std::wstring& why) {
+    const int64_t now = static_cast<int64_t>(_time64(nullptr));
+    std::lock_guard<std::mutex> lock(dataMutex_);
+    if (health_.backoffUntil > now) {
+        why = L"rate limited; retrying in " + std::to_wstring(health_.backoffUntil - now) + L" s";
+        return true;
+    }
+    return false;
+}
+
+void Fetcher::Record(Endpoint ep, bool ok, const HttpResult& res, const std::wstring& err) {
+    const int64_t now = static_cast<int64_t>(_time64(nullptr));
+    std::lock_guard<std::mutex> lock(dataMutex_);
+    EndpointHealth& h = health_.endpoints[static_cast<size_t>(ep)];
+    h.lastStatus = res.status;
+    if (res.elapsedMs > 0) { h.lastMs = res.elapsedMs; }
+    if (ok) {
+        h.lastOk   = now;
+        h.failures = 0;
+        h.lastError.clear();
+    } else {
+        h.lastFail = now;
+        ++h.failures;
+        h.lastError = err;
+    }
+}
+
+bool Fetcher::CopyBench(size_t range, QuoteData& out) {
+    if (!bench_) { return false; }
+    std::lock_guard<std::mutex> lock(dataMutex_);
+    if (!benchValid_ || benchRange_ != range) { return false; }
+    out = *bench_;
+    return true;
+}
+
+void Fetcher::CopyHealth(Health& out) {
+    std::lock_guard<std::mutex> lock(dataMutex_);
+    out = health_;
+    {
+        std::lock_guard<std::mutex> qlock(qMutex_);
+        out.pending = qCount_;
+    }
 }
 
 bool Fetcher::CopySummary(size_t stock, QuoteData& out) {

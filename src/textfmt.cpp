@@ -90,6 +90,34 @@ std::wstring FormatRatio(double v) {
     return FormatPrice(v);
 }
 
+std::wstring FormatIsoDate(int64_t unixTime) {
+    const __time64_t t = static_cast<__time64_t>(unixTime);
+    tm p{};
+    if (_gmtime64_s(&p, &t) != 0) { return L"?"; }
+    std::array<wchar_t, 16> b{};
+    swprintf_s(b.data(), b.size(), L"%04d-%02d-%02d", p.tm_year + 1900, p.tm_mon + 1, p.tm_mday);
+    return b.data();
+}
+
+bool ParseIsoDate(const std::wstring& text, int64_t& unixTime) {
+    int y = 0;
+    int m = 0;
+    int d = 0;
+    if (swscanf_s(text.c_str(), L"%d-%d-%d", &y, &m, &d) != 3) { return false; }
+    if (y < 1970 || y > 2200 || m < 1 || m > 12 || d < 1 || d > 31) { return false; }
+    tm p{};
+    p.tm_year = y - 1900;
+    p.tm_mon  = m - 1;
+    p.tm_mday = d;
+    const __time64_t t = _mkgmtime64(&p);
+    if (t < 0) { return false; }
+    // Reject 2026-02-31 style dates that mkgmtime would silently roll over.
+    tm back{};
+    if (_gmtime64_s(&back, &t) != 0 || back.tm_mday != d || back.tm_mon != m - 1) { return false; }
+    unixTime = static_cast<int64_t>(t);
+    return true;
+}
+
 std::wstring FormatDate(int64_t unixTime, int32_t gmtOffsetSec, DateStyle style) {
     const __time64_t local = static_cast<__time64_t>(unixTime + gmtOffsetSec);
     tm p{};

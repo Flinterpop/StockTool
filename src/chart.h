@@ -14,6 +14,7 @@ struct ChartOptions {
     bool bollinger = false;
     bool rsi       = false;
     bool inset     = true;
+    bool benchmark = false;
 };
 
 // One line in the compare overlay.
@@ -28,6 +29,8 @@ struct ChartInput {
     ChartOptions     opts;
     const QuoteData* inset      = nullptr;  // trend inset data (nullptr = loading/off)
     const wchar_t*   insetLabel = nullptr;  // e.g. L"1Y"
+    const QuoteData* bench      = nullptr;  // benchmark index at the same range (nullptr = none yet)
+    const wchar_t*   benchLabel = nullptr;  // e.g. L"^GSPTSE"
     float            insetX     = 0.0f;     // inset position as a fraction (0..1) of the
     float            insetY     = 0.0f;     // free space in the plot; (0,0) = top-left
     bool             compare    = false;    // draw `entries` as % change instead of `data`

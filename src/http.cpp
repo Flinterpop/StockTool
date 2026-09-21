@@ -102,6 +102,13 @@ bool HttpClient::Get(const std::wstring& url, char* buf, size_t cap,
         return false;
     }
     if (!EnsureSession(err)) { return false; }
+    const ULONGLONG started = GetTickCount64();
+    // Records the latency whichever way the function returns.
+    struct Timer {
+        ULONGLONG start;
+        HttpResult& res;
+        ~Timer() { res.elapsedMs = static_cast<uint32_t>(GetTickCount64() - start); }
+    } timer{ started, out };
 
     std::array<wchar_t, 256>  host{};
     std::array<wchar_t, 2048> path{};

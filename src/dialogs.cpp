@@ -1,11 +1,13 @@
 #include "dialogs.h"
 
+#include "position.h"
 #include "resource.h"
 #include "textfmt.h"
 
 #include <array>
 #include <cassert>
 #include <cmath>
+#include <ctime>
 #include <cwctype>
 
 namespace st {
@@ -480,6 +482,203 @@ bool RunListNameDialog(HINSTANCE inst, HWND owner, const std::wstring& title, st
     if (rc != IDOK) { return false; }
     name = st.name;
     assert(!name.empty());
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Transactions
+
+namespace {
+
+struct TxState {
+    std::wstring symbol;
+    std::array<Transaction, kMaxTxPerSymbol> tx{};
+    size_t count = 0;
+};
+
+void RefreshTxList(HWND dlg, const TxState& st) {
+    const HWND list = GetDlgItem(dlg, IDC_TXLIST);
+    SendMessageW(list, LB_RESETCONTENT, 0, 0);
+    for (size_t i = 0; i < st.count; ++i) {
+        const Transaction& t = st.tx[i];
+        std::wstring row = FormatIsoDate(t.date) + L"\t" + (t.qty > 0.0 ? L"Buy  " : L"Sell ") +
+                           FormatMoney(std::fabs(t.qty)) + L" @ " + FormatPrice(t.price) +
+                           L"\t= " + FormatMoney(std::fabs(t.qty) * t.price);
+        SendMessageW(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(row.c_str()));
+    }
+    const Position p = ComputePosition(st.tx.data(), st.count);
+    std::wstring summary;
+    if (p.qty > 0.0) {
+        summary = L"Holding " + FormatMoney(p.qty) + L" sh at an average cost of " + FormatPrice(p.acb) +
+                  L" (cost " + FormatMoney(p.cost) + L")";
+    } else {
+        summary = L"No shares held";
+    }
+    if (p.realised != 0.0) { summary += L"  ·  Realised " + FormatSignedMoney(p.realised); }
+    SetDlgItemTextW(dlg, IDC_TSUMMARY, summary.c_str());
+    EnableWindow(GetDlgItem(dlg, IDC_TXADD), st.count < kMaxTxPerSymbol);
+}
+
+bool AddTxFromFields(HWND dlg, TxState& st) {
+    if (st.count >= kMaxTxPerSymbol) {
+        SetDlgItemTextW(dlg, IDC_THINT, L"Limit of 32 transactions per ticker reached.");
+        return false;
+    }
+    Transaction t;
+    if (!ParseIsoDate(FieldText(dlg, IDC_TXDATE), t.date)) {
+        SetDlgItemTextW(dlg, IDC_THINT, L"Enter the date as YYYY-MM-DD.");
+        return false;
+    }
+    std::wstring qtyText = FieldText(dlg, IDC_TXQTY);
+    bool sell = false;
+    if (!qtyText.empty() && qtyText[0] == L'-') { sell = true; qtyText.erase(0, 1); }
+    double qty = 0.0;
+    double price = 0.0;
+    if (!ParseAmount(qtyText, qty) || qty <= 0.0 || !ParseAmount(FieldText(dlg, IDC_TXPRICE), price) || price <= 0.0) {
+        SetDlgItemTextW(dlg, IDC_THINT, L"Shares and price must be positive numbers (use a leading - to sell).");
+        return false;
+    }
+    t.qty   = sell ? -qty : qty;
+    t.price = price;
+    st.tx[st.count] = t;
+    ++st.count;
+    SetDlgItemTextW(dlg, IDC_THINT, L"");
+    SetDlgItemTextW(dlg, IDC_TXQTY, L"");
+    SetDlgItemTextW(dlg, IDC_TXPRICE, L"");
+    RefreshTxList(dlg, st);
+    SetFocus(GetDlgItem(dlg, IDC_TXQTY));
+    return true;
+}
+
+INT_PTR CALLBACK TransactionsProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_INITDIALOG: {
+        SetWindowLongPtrW(dlg, DWLP_USER, static_cast<LONG_PTR>(lp));
+        auto* st = reinterpret_cast<TxState*>(lp);
+        assert(st != nullptr);
+        SetDlgItemTextW(dlg, IDC_TTITLE, (L"Buys and sells of " + st->symbol + L" (average-cost method)").c_str());
+        const int tabs[2] = { 55, 170 };
+        SendDlgItemMessageW(dlg, IDC_TXLIST, LB_SETTABSTOPS, 2, reinterpret_cast<LPARAM>(tabs));
+        SendDlgItemMessageW(dlg, IDC_TXDATE, EM_LIMITTEXT, 10, 0);
+        SendDlgItemMessageW(dlg, IDC_TXQTY, EM_LIMITTEXT, 24, 0);
+        SendDlgItemMessageW(dlg, IDC_TXPRICE, EM_LIMITTEXT, 24, 0);
+        SetDlgItemTextW(dlg, IDC_TXDATE, FormatIsoDate(static_cast<int64_t>(_time64(nullptr))).c_str());
+        RefreshTxList(dlg, *st);
+        CentreOnOwner(dlg);
+        return TRUE;
+    }
+    case WM_COMMAND: {
+        const int id = LOWORD(wp);
+        auto* st = reinterpret_cast<TxState*>(GetWindowLongPtrW(dlg, DWLP_USER));
+        if (st == nullptr) { return FALSE; }
+        if (id == IDC_TXADD) {
+            AddTxFromFields(dlg, *st);
+            return TRUE;
+        }
+        if (id == IDC_TXDELETE) {
+            const LRESULT sel = SendDlgItemMessageW(dlg, IDC_TXLIST, LB_GETCURSEL, 0, 0);
+            if (sel != LB_ERR && static_cast<size_t>(sel) < st->count) {
+                for (size_t i = static_cast<size_t>(sel); i + 1 < st->count && i + 1 < kMaxTxPerSymbol; ++i) { st->tx[i] = st->tx[i + 1]; }
+                --st->count;
+                RefreshTxList(dlg, *st);
+            }
+            return TRUE;
+        }
+        if (id == IDOK) {
+            // Enter in an entry field adds; the Save button saves.
+            const HWND focus = GetFocus();
+            if (focus == GetDlgItem(dlg, IDC_TXDATE) || focus == GetDlgItem(dlg, IDC_TXQTY) || focus == GetDlgItem(dlg, IDC_TXPRICE)) {
+                AddTxFromFields(dlg, *st);
+                return TRUE;
+            }
+            EndDialog(dlg, IDOK);
+            return TRUE;
+        }
+        if (id == IDCANCEL) {
+            EndDialog(dlg, IDCANCEL);
+            return TRUE;
+        }
+        return FALSE;
+    }
+    default:
+        return FALSE;
+    }
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// Import confirmation
+
+namespace {
+
+struct ImportState {
+    std::wstring title;
+    std::wstring text;
+    bool addUnknown = false;
+};
+
+INT_PTR CALLBACK ImportProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_INITDIALOG: {
+        auto* st = reinterpret_cast<ImportState*>(lp);
+        assert(st != nullptr);
+        SetWindowLongPtrW(dlg, DWLP_USER, lp);
+        SetDlgItemTextW(dlg, IDC_IMPORT_TITLE, st->title.c_str());
+        SetDlgItemTextW(dlg, IDC_IMPORT_TEXT, st->text.c_str());
+        CheckDlgButton(dlg, IDC_IMPORT_ADD, st->addUnknown ? BST_CHECKED : BST_UNCHECKED);
+        CentreOnOwner(dlg);
+        SetFocus(GetDlgItem(dlg, IDOK));   // not the summary, which would select all its text
+        return FALSE;
+    }
+    case WM_COMMAND: {
+        const int id = LOWORD(wp);
+        if (id == IDOK) {
+            auto* st = reinterpret_cast<ImportState*>(GetWindowLongPtrW(dlg, DWLP_USER));
+            assert(st != nullptr);
+            if (st != nullptr) { st->addUnknown = IsDlgButtonChecked(dlg, IDC_IMPORT_ADD) == BST_CHECKED; }
+            EndDialog(dlg, IDOK);
+            return TRUE;
+        }
+        if (id == IDCANCEL) {
+            EndDialog(dlg, IDCANCEL);
+            return TRUE;
+        }
+        return FALSE;
+    }
+    default:
+        return FALSE;
+    }
+}
+
+} // namespace
+
+bool RunImportDialog(HINSTANCE inst, HWND owner, const std::wstring& title, const std::wstring& text, bool& addUnknown) {
+    assert(inst != nullptr && owner != nullptr);
+    ImportState st;
+    st.title      = title;
+    st.text       = text;
+    st.addUnknown = addUnknown;
+    const INT_PTR rc = DialogBoxParamW(inst, MAKEINTRESOURCEW(IDD_IMPORT), owner, &ImportProc,
+                                       reinterpret_cast<LPARAM>(&st));
+    if (rc != IDOK) { return false; }
+    addUnknown = st.addUnknown;
+    return true;
+}
+
+bool RunTransactionsDialog(HINSTANCE inst, HWND owner, const std::wstring& symbol,
+                           std::array<Transaction, kMaxTxPerSymbol>& tx, size_t& count) {
+    assert(inst != nullptr && owner != nullptr && !symbol.empty());
+    assert(count <= kMaxTxPerSymbol);
+    TxState st;
+    st.symbol = symbol;
+    st.tx     = tx;
+    st.count  = count;
+    const INT_PTR rc = DialogBoxParamW(inst, MAKEINTRESOURCEW(IDD_TRANSACTIONS), owner, &TransactionsProc,
+                                       reinterpret_cast<LPARAM>(&st));
+    if (rc != IDOK) { return false; }
+    tx    = st.tx;
+    count = st.count;
     return true;
 }
 

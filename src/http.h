@@ -8,8 +8,9 @@
 namespace st {
 
 struct HttpResult {
-    uint32_t status = 0;   // HTTP status code
-    size_t   length = 0;   // bytes written to the caller's buffer
+    uint32_t status    = 0;   // HTTP status code
+    size_t   length    = 0;   // bytes written to the caller's buffer
+    uint32_t elapsedMs = 0;   // wall time of the whole request
 };
 
 // One WinHTTP session, reused across requests so cookies persist (the

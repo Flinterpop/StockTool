@@ -196,3 +196,29 @@ TEST_CASE("news JSON: headlines with publisher, link and time") {
     CHECK(out[1].publisher.empty());
     CHECK_FALSE(ParseNewsJson("{}", 2, out, count, err));
 }
+
+TEST_CASE("news RSS: Google News items with source, entities and RFC 822 dates") {
+    constexpr char kRss[] =
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><rss version=\"2.0\"><channel><title>x</title>"
+        "<item><title>Royal Bank &amp; peers rise as BoC holds - The Globe and Mail</title>"
+        "<link>https://news.google.com/rss/articles/abc</link>"
+        "<pubDate>Sat, 20 Sep 2026 12:00:00 GMT</pubDate>"
+        "<source url=\"https://www.theglobeandmail.com\">The Globe and Mail</source></item>"
+        "<item><title><![CDATA[RBC&#39;s CEO on rates]]></title><link>https://example.test/b</link>"
+        "<pubDate>19 Sep 2026 08:30:00 GMT</pubDate></item>"
+        "<item><title></title><link>https://example.test/empty</link></item>"
+        "</channel></rss>";
+    std::array<NewsItem, kMaxNews> out{};
+    size_t count = 0;
+    std::wstring err;
+    REQUIRE(ParseNewsRss(kRss, std::strlen(kRss), out, count, err));
+    REQUIRE(count == 2);                                           // untitled item skipped
+    CHECK(out[0].title == L"Royal Bank & peers rise as BoC holds"); // publisher suffix stripped, entity decoded
+    CHECK(out[0].publisher == L"The Globe and Mail");
+    CHECK(out[0].link == L"https://news.google.com/rss/articles/abc");
+    CHECK(out[0].time == 1789905600);                              // 2026-09-20 12:00 UTC
+    CHECK(out[1].title == L"RBC's CEO on rates");                  // CDATA + numeric entity
+    CHECK(out[1].publisher.empty());
+    CHECK(out[1].time == 1789806600);                              // 2026-09-19 08:30 UTC, no weekday
+    CHECK_FALSE(ParseNewsRss("<html>nope</html>", 16, out, count, err));
+}

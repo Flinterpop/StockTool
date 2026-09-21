@@ -13,7 +13,10 @@
 
 namespace st {
 
-enum class JobKind : uint8_t { Summary, Chart, Inset, Quote, Search, Fx, News };
+enum class JobKind : uint8_t { Summary, Chart, Inset, Quote, Search, Fx, News, Bench };
+
+// Endpoint slots for the health panel.
+enum class Endpoint : uint8_t { Chart, Quote, Search, Fx, News, Crumb };
 
 struct FetchJob {
     JobKind      kind   = JobKind::Summary;
@@ -33,6 +36,8 @@ constexpr UINT WM_APP_QUOTE_READY   = WM_APP + 4;  // fundamentals for all symbo
 constexpr UINT WM_APP_SEARCH_READY  = WM_APP + 5;  // posted to the search job's notify window
 constexpr UINT WM_APP_FX_READY      = WM_APP + 6;  // an FX rate arrived (see CopyFx)
 constexpr UINT WM_APP_NEWS_READY    = WM_APP + 7;  // wParam = stock
+constexpr UINT WM_APP_BENCH_READY   = WM_APP + 8;  // lParam = range
+constexpr UINT WM_APP_BACKOFF       = WM_APP + 9;  // wParam = seconds the provider asked us to wait
 
 class Fetcher {
 public:
@@ -62,11 +67,14 @@ public:
     // False when the feature is disabled or the query is empty.
     bool EnqueueSearch(const std::wstring& query, HWND notify);
     bool SearchEnabled() const { return !cfg_.searchUrlTemplate.empty(); }
-    bool NewsEnabled() const { return !cfg_.newsUrlTemplate.empty(); }
+    bool NewsEnabled() const { return cfg_.newsSource != NewsSource::None; }
 
     // Queues an FX rate fetch (from -> to, e.g. USD -> CAD) via the chart
     // endpoint's "FROMTO=X" symbols.
     bool EnqueueFx(const std::wstring& from, const std::wstring& to);
+
+    // Queues the benchmark index (cfg.benchmark) at `range`. False when unset.
+    bool EnqueueBench(size_t range);
 
     // Copy the latest result for the UI thread. False if none / stale. The
     // caller must compare QuoteData::symbol with what it expects at `stock`.
@@ -79,6 +87,15 @@ public:
     bool CopyFx(std::array<FxRate, kMaxFx>& out);
     bool CopyNews(size_t stock, std::array<NewsItem, kMaxNews>& out, size_t& count,
                   std::wstring& symbol, std::wstring& err);
+    bool CopyBench(size_t range, QuoteData& out);
+
+    // Diagnostics: per-endpoint health, rate-limit backoff and queue depth.
+    struct Health {
+        std::array<EndpointHealth, kEndpointCount> endpoints{};
+        int64_t backoffUntil = 0;   // Unix time; 0 = not backing off
+        size_t  pending      = 0;
+    };
+    void CopyHealth(Health& out);
 
 private:
     static unsigned __stdcall ThreadEntry(void* arg);
@@ -90,6 +107,10 @@ private:
     void ProcessSearch(const FetchJob& job);
     void ProcessFx(const FetchJob& job);
     void ProcessNews(const FetchJob& job);
+    void ProcessBench(const FetchJob& job);
+    bool Get(Endpoint ep, const std::wstring& url, HttpResult& res, std::wstring& err);   // http_.Get + health/backoff
+    bool InBackoff(std::wstring& why);
+    void Record(Endpoint ep, bool ok, const HttpResult& res, const std::wstring& err);
     bool Fetch(const std::wstring& url, QuoteData& out);
     bool EnsureCrumb(std::wstring& err);
     std::wstring BuildUrl(const std::wstring& symbol, const RangeSpec& spec) const;
@@ -136,6 +157,12 @@ private:
         bool         valid = false;
     };
     std::unique_ptr<std::array<NewsSlot, kMaxStocks>> news_;
+    std::unique_ptr<QuoteData> bench_;
+    size_t benchRange_ = 0;
+    bool   benchValid_ = false;
+
+    Health   health_;            // guarded by dataMutex_
+    unsigned backoffSteps_ = 0;  // doubles the pause on repeated 429s
 };
 
 } // namespace st

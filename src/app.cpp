@@ -1,6 +1,8 @@
 #include "app.h"
 
+#include "brokerimport.h"
 #include "dialogs.h"
+#include "help.h"
 #include "resource.h"
 #include "textfmt.h"
 
@@ -31,12 +33,26 @@ constexpr wchar_t kWindowTitle[] = L"StockTool v" ST_WIDE(STOCKTOOL_VERSION);
 constexpr int IDC_LIST       = 100;
 constexpr int IDC_TABS       = 101;
 constexpr int IDC_RANGE_BASE = 200;   // + range index
-constexpr int IDC_STYLE      = 300;
 constexpr int IDC_REFRESH    = 301;
 constexpr int IDC_ADD        = 302;
 constexpr int IDC_REMOVE     = 303;
 constexpr int IDC_RELOAD     = 304;
-constexpr int IDC_COMPARE    = 305;
+
+// Toolbar: one toggle per View-menu command that changes the plot. The
+// buttons use the menu command IDs, so one handler serves both.
+struct ToolSpec { int id; const wchar_t* label; int widthDip; };
+constexpr std::array<ToolSpec, 9> kTools = {{
+    { IDM_CANDLES,   L"Candles",   70 },
+    { IDM_COMPARE,   L"Compare",   72 },
+    { IDM_SMA20,     L"SMA 20",    62 },
+    { IDM_SMA50,     L"SMA 50",    62 },
+    { IDM_BOLLINGER, L"Bollinger", 76 },
+    { IDM_RSI,       L"RSI",       50 },
+    { IDM_INSET,     L"Inset",     58 },
+    { IDM_NEWS,      L"News",      58 },
+    { IDM_BENCHMARK, L"Bench",     58 },
+}};
+static_assert(kTools.size() == App::kToolCount, "toolbar table and button array differ");
 
 constexpr UINT     WM_APP_TRAY   = WM_APP + 10;
 constexpr UINT_PTR kRefreshTimer = 1;
@@ -47,7 +63,8 @@ constexpr int kMargin      = 10;
 constexpr int kListW       = 250;
 constexpr int kListItemH   = 44;
 constexpr int kTabsH       = 26;
-constexpr int kPortfolioH  = 62;
+constexpr int kPortfolioH  = 78;
+constexpr int kToolbarH    = 26;
 constexpr int kHeaderH     = 76;
 constexpr int kButtonH     = 26;
 constexpr int kRangeBtnW   = 46;
@@ -185,6 +202,7 @@ bool App::Create(HINSTANCE hInst, int nCmdShow, std::wstring& err) {
     incoming_  = std::make_unique<QuoteData>();
     quotes_    = std::make_unique<std::array<QuoteStats, kMaxStocks>>();
     news_      = std::make_unique<std::array<NewsCache, kMaxStocks>>();
+    bench_     = std::make_unique<QuoteData>();
     theme_     = &ThemeFor(cfg_.theme == ThemeMode::Dark ||
                            (cfg_.theme == ThemeMode::System && SystemPrefersDark()));
 
@@ -222,9 +240,10 @@ bool App::Create(HINSTANCE hInst, int nCmdShow, std::wstring& err) {
         return false;
     }
 
-    std::array<ACCEL, 6 + kRanges.size()> accel{};
+    std::array<ACCEL, 7 + kRanges.size()> accel{};
     size_t n = 0;
     accel[n++] = { FVIRTKEY, VK_F5, static_cast<WORD>(IDM_REFRESH) };
+    accel[n++] = { FVIRTKEY, VK_F1, static_cast<WORD>(IDM_HELP) };
     accel[n++] = { FVIRTKEY | FCONTROL, 'N', static_cast<WORD>(IDM_ADD) };
     accel[n++] = { FVIRTKEY | FCONTROL, 'F', static_cast<WORD>(IDM_ADD) };
     accel[n++] = { FVIRTKEY, VK_F2, static_cast<WORD>(IDM_EDIT) };
@@ -340,6 +359,8 @@ LRESULT App::Handle(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_APP_QUOTE_READY:   OnQuoteReady(); return 0;
     case WM_APP_FX_READY:      OnFxReady(); return 0;
     case WM_APP_NEWS_READY:    OnNewsReady(static_cast<size_t>(wp)); return 0;
+    case WM_APP_BENCH_READY:   OnBenchReady(static_cast<size_t>(lp)); return 0;
+    case WM_APP_BACKOFF:       OnBackoff(static_cast<size_t>(wp)); return 0;
     default: break;
     }
     return DefWindowProcW(hwnd_, msg, wp, lp);
@@ -384,6 +405,7 @@ void App::OnCreate() {
         RequestInset(true);
         RequestNews(true);
     }
+    RequestBench();
     SetTimer(hwnd_, kRefreshTimer, cfg_.refreshSeconds * 1000u, nullptr);
     SetStatus(L"Loading " + std::to_wstring(cfg_.stockCount) + L" symbols from " + cfg_.path);
 }
@@ -420,11 +442,14 @@ void App::CreateFonts() {
                            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                            DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
     assert(hUiFont_ != nullptr);
-    const HWND controls[] = { hList_, hTabs_, hStyleBtn_, hCompareBtn_, hRefreshBtn_, hAddBtn_, hRemoveBtn_, hReloadBtn_ };
+    const HWND controls[] = { hList_, hTabs_, hRefreshBtn_, hAddBtn_, hRemoveBtn_, hReloadBtn_ };
     for (HWND h : controls) {
         if (h != nullptr) { SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(hUiFont_), TRUE); }
     }
     for (HWND h : hRangeBtns_) {
+        if (h != nullptr) { SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(hUiFont_), TRUE); }
+    }
+    for (HWND h : hToolBtns_) {
         if (h != nullptr) { SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(hUiFont_), TRUE); }
     }
     if (hList_ != nullptr) { SendMessageW(hList_, LB_SETITEMHEIGHT, 0, static_cast<LPARAM>(Px(kListItemH))); }
@@ -457,8 +482,9 @@ void App::CreateControls() {
                                 IDC_RANGE_BASE + static_cast<int>(i));
     }
     SendMessageW(hRangeBtns_[range_], BM_SETCHECK, BST_CHECKED, 0);
-    hStyleBtn_   = button(L"Candles", WS_GROUP | BS_AUTOCHECKBOX | BS_PUSHLIKE, IDC_STYLE);
-    hCompareBtn_ = button(L"Compare", WS_GROUP | BS_AUTOCHECKBOX | BS_PUSHLIKE, IDC_COMPARE);
+    for (size_t i = 0; i < kTools.size(); ++i) {
+        hToolBtns_[i] = button(kTools[i].label, WS_GROUP | BS_AUTOCHECKBOX | BS_PUSHLIKE, kTools[i].id);
+    }
     hRefreshBtn_ = button(L"Refresh (F5)", WS_GROUP | BS_PUSHBUTTON, IDC_REFRESH);
     hAddBtn_     = button(L"Add…", WS_GROUP | BS_PUSHBUTTON, IDC_ADD);
     hRemoveBtn_  = button(L"Remove", BS_PUSHBUTTON, IDC_REMOVE);
@@ -548,17 +574,24 @@ void App::Layout() {
 
     const int rightX = listRect_.right + m;
     const int rightR = w - m;
-    headerRect_ = { rightX, m, rightR, m + Px(kHeaderH) };
+    const int btnH = Px(kButtonH);
+
+    // Toolbar across the top: the plot toggles.
+    toolbarRect_ = { rightX, m, rightR, m + Px(kToolbarH) };
+    int tx = rightX;
+    for (size_t i = 0; i < kTools.size(); ++i) {
+        MoveWindow(hToolBtns_[i], tx, toolbarRect_.top, Px(kTools[i].widthDip), btnH, TRUE);
+        tx += Px(kTools[i].widthDip) + Px(kBtnGap);
+    }
+
+    headerRect_ = { rightX, toolbarRect_.bottom + Px(kListBtnGap), rightR, toolbarRect_.bottom + Px(kListBtnGap) + Px(kHeaderH) };
 
     const int btnY = headerRect_.bottom + Px(4);
-    const int btnH = Px(kButtonH);
     int x = rightX;
     for (size_t i = 0; i < kRanges.size(); ++i) {
         MoveWindow(hRangeBtns_[i], x, btnY, Px(kRangeBtnW), btnH, TRUE);
         x += Px(kRangeBtnW) + Px(kBtnGap);
     }
-    MoveWindow(hStyleBtn_, x + m, btnY, Px(kWideBtnW), btnH, TRUE);
-    MoveWindow(hCompareBtn_, x + m + Px(kWideBtnW + kBtnGap), btnY, Px(kWideBtnW), btnH, TRUE);
     MoveWindow(hRefreshBtn_, rightR - Px(kWideBtnW + 16), btnY, Px(kWideBtnW + 16), btnH, TRUE);
 
     statusRect_ = { rightX, h - m - Px(kStatusH), rightR, h - m };
@@ -586,11 +619,14 @@ void App::ApplyTheme() {
     (void)hr;  // pre-20H1 builds ignore the attribute; the client area is still themed
 
     const wchar_t* sub = dark ? L"DarkMode_Explorer" : L"Explorer";
-    const HWND controls[] = { hList_, hTabs_, hStyleBtn_, hCompareBtn_, hRefreshBtn_, hAddBtn_, hRemoveBtn_, hReloadBtn_ };
+    const HWND controls[] = { hList_, hTabs_, hRefreshBtn_, hAddBtn_, hRemoveBtn_, hReloadBtn_ };
     for (HWND h : controls) {
         if (h != nullptr) { SetWindowTheme(h, sub, nullptr); }
     }
     for (HWND h : hRangeBtns_) {
+        if (h != nullptr) { SetWindowTheme(h, sub, nullptr); }
+    }
+    for (HWND h : hToolBtns_) {
         if (h != nullptr) { SetWindowTheme(h, sub, nullptr); }
     }
     chartDirty_ = true;
@@ -619,13 +655,25 @@ void App::SyncViewMenu() {
     check(IDM_RSI,       state_.rsi);
     check(IDM_INSET,     state_.inset);
     check(IDM_NEWS,      state_.news);
+    check(IDM_BENCHMARK, state_.benchmark);
+    EnableMenuItem(hMenu_, IDM_BENCHMARK, MF_BYCOMMAND | (cfg_.benchmark.empty() ? MF_GRAYED : MF_ENABLED));
     check(IDM_MINTRAY,   cfg_.minimizeToTray);
     EnableMenuItem(hMenu_, IDM_NEWS, MF_BYCOMMAND | (fetcher_.NewsEnabled() || hwnd_ == nullptr ? MF_ENABLED : MF_GRAYED));
     const int themeId = (cfg_.theme == ThemeMode::Light) ? IDM_THEME_LIGHT
                       : (cfg_.theme == ThemeMode::Dark)  ? IDM_THEME_DARK : IDM_THEME_SYSTEM;
     CheckMenuRadioItem(hMenu_, IDM_THEME_SYSTEM, IDM_THEME_DARK, static_cast<UINT>(themeId), MF_BYCOMMAND);
-    SendMessageW(hStyleBtn_, BM_SETCHECK, state_.candles ? BST_CHECKED : BST_UNCHECKED, 0);
-    SendMessageW(hCompareBtn_, BM_SETCHECK, state_.compare ? BST_CHECKED : BST_UNCHECKED, 0);
+    const bool flags[kTools.size()] = {
+        state_.candles, state_.compare, state_.sma20, state_.sma50,
+        state_.bollinger, state_.rsi, state_.inset, state_.news, state_.benchmark,
+    };
+    for (size_t i = 0; i < kTools.size(); ++i) {
+        if (hToolBtns_[i] != nullptr) {
+            SendMessageW(hToolBtns_[i], BM_SETCHECK, flags[i] ? BST_CHECKED : BST_UNCHECKED, 0);
+            const bool off = (kTools[i].id == IDM_NEWS && !fetcher_.NewsEnabled() && hwnd_ != nullptr) ||
+                             (kTools[i].id == IDM_BENCHMARK && cfg_.benchmark.empty());
+            EnableWindow(hToolBtns_[i], off ? FALSE : TRUE);
+        }
+    }
     DrawMenuBar(hwnd_);
 }
 
@@ -683,6 +731,11 @@ void App::RequestNews(bool clearCurrent) {
     fetcher_.Enqueue(JobKind::News, selected_, 0);
 }
 
+void App::RequestBench() {
+    if (!state_.benchmark || cfg_.benchmark.empty()) { return; }
+    fetcher_.EnqueueBench(range_);
+}
+
 // Warms the caches for every other ticker so switching is instant. Runs
 // after the selected ticker's own data has arrived, so it never delays it.
 void App::PrefetchOthers() {
@@ -697,7 +750,7 @@ void App::PrefetchOthers() {
 // portfolio currency and has no rate yet.
 void App::EnsureFxRates() {
     for (size_t i = 0; i < cfg_.stockCount; ++i) {
-        if (cfg_.stocks[i].holding.qty <= 0.0) { continue; }
+        if (PositionOf(i).qty <= 0.0) { continue; }
         const std::wstring cur = CurrencyOf(i);
         if (cur.empty() || SameSymbol(cur, cfg_.portfolioCurrency)) { continue; }
         if (std::isnan(RateToPortfolio(cur))) { fetcher_.EnqueueFx(cur, cfg_.portfolioCurrency); }
@@ -722,7 +775,9 @@ void App::SelectRange(size_t index) {
     range_ = index;
     SendMessageW(hRangeBtns_[index], BM_SETCHECK, BST_CHECKED, 0);
     for (size_t i = 0; i < kMaxStocks; ++i) { chartValid_[i] = false; }
+    benchValid_ = false;
     RequestChart(true);
+    RequestBench();
 }
 
 void App::RedrawChart() {
@@ -804,11 +859,32 @@ double App::TrailingDividends(size_t index) const {
     return total;
 }
 
+Position App::PositionOf(size_t index) const {
+    assert(index < cfg_.stockCount);
+    const StockEntry& e = cfg_.stocks[index];
+    if (e.txCount > 0) { return ComputePosition(e.tx.data(), e.txCount); }
+    Position p;
+    p.qty      = e.holding.qty;
+    p.acb      = e.holding.cost;
+    p.cost     = e.holding.qty * e.holding.cost;
+    p.invested = p.cost;
+    return p;
+}
+
+double App::DividendsReceivedFor(size_t index) const {
+    assert(index < cfg_.stockCount);
+    const StockEntry& e = cfg_.stocks[index];
+    if (e.txCount == 0 || !insetValid_[index] || !(*insets_)[index].valid) { return kNaN; }
+    const QuoteData& q = (*insets_)[index];
+    return DividendsReceived(e.tx.data(), e.txCount, q.dividends.data(), q.dividendCount);
+}
+
 App::Portfolio App::ComputePortfolio() const {
     Portfolio p;
     for (size_t i = 0; i < cfg_.stockCount; ++i) {
-        const Holding& h = cfg_.stocks[i].holding;
-        if (h.qty <= 0.0) { continue; }
+        const Position pos = PositionOf(i);
+        const bool hasTx = cfg_.stocks[i].txCount > 0;
+        if (pos.qty <= 0.0 && !(hasTx && pos.realised != 0.0)) { continue; }
         p.any = true;
         const QuoteData& q = (*summaries_)[i];
         const PriceChange pc = ComputeChange(q);
@@ -818,11 +894,14 @@ App::Portfolio App::ComputePortfolio() const {
             p.partial = true;
             continue;
         }
-        p.value += h.qty * pc.last * rate;
-        p.cost  += h.qty * h.cost * rate;
-        p.day   += h.qty * pc.change * rate;
+        p.value    += pos.qty * pc.last * rate;
+        p.cost     += pos.cost * rate;
+        p.day      += pos.qty * pc.change * rate;
+        p.realised += pos.realised * rate;
         const double div = TrailingDividends(i);
-        if (!std::isnan(div)) { p.income += h.qty * div * rate; }
+        if (!std::isnan(div)) { p.income += pos.qty * div * rate; }
+        const double rec = DividendsReceivedFor(i);
+        if (!std::isnan(rec)) { p.received += rec * rate; }
     }
     return p;
 }
@@ -1273,6 +1352,45 @@ bool App::SaveCsvDialog(const wchar_t* suggested, std::wstring& path) {
     return !path.empty();
 }
 
+bool App::OpenCsvDialog(std::wstring& path) {
+    std::array<wchar_t, MAX_PATH> file{};
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner   = hwnd_;
+    ofn.lpstrFilter = L"CSV files (*.csv)\0*.csv\0All files (*.*)\0*.*\0";
+    ofn.lpstrFile   = file.data();
+    ofn.nMaxFile    = static_cast<DWORD>(file.size());
+    ofn.lpstrTitle  = L"Import a WebBroker Holdings or Activity export";
+    ofn.Flags       = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    if (!GetOpenFileNameW(&ofn)) { return false; }
+    path = file.data();
+    return !path.empty();
+}
+
+bool App::ReadWholeFile(const std::wstring& path, std::string& bytes, std::wstring& err) {
+    constexpr DWORD kMaxBytes = 8u * 1024u * 1024u;   // an export is a few hundred KB at most
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        err = L"Cannot open " + path;
+        return false;
+    }
+    LARGE_INTEGER size{};
+    if (!GetFileSizeEx(h, &size) || size.QuadPart > kMaxBytes) {
+        CloseHandle(h);
+        err = L"File is too large to be a broker export: " + path;
+        return false;
+    }
+    bytes.resize(static_cast<size_t>(size.QuadPart));
+    DWORD got = 0;
+    const BOOL ok = bytes.empty() || ReadFile(h, bytes.data(), static_cast<DWORD>(bytes.size()), &got, nullptr);
+    CloseHandle(h);
+    if (!ok || got != bytes.size()) {
+        err = L"Cannot read " + path;
+        return false;
+    }
+    return true;
+}
+
 bool App::WriteTextFile(const std::wstring& path, const std::string& utf8, std::wstring& err) {
     HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) {
@@ -1305,9 +1423,10 @@ void App::OnExportList() {
         } else {
             csv += ",,,";
         }
-        csv += "," + (e.holding.qty > 0.0 ? CsvNum(e.holding.qty, 4) : "") +
-               "," + (e.holding.cost > 0.0 ? CsvNum(e.holding.cost, 4) : "") +
-               "," + (e.holding.qty > 0.0 && pc.valid ? CsvNum(e.holding.qty * pc.last, 2) : "") +
+        const Position pos = PositionOf(i);
+        csv += "," + (pos.qty > 0.0 ? CsvNum(pos.qty, 4) : "") +
+               "," + (pos.acb > 0.0 ? CsvNum(pos.acb, 4) : "") +
+               "," + (pos.qty > 0.0 && pc.valid ? CsvNum(pos.qty * pc.last, 2) : "") +
                "," + (q.valid && q.meta.wk52High > 0.0 ? CsvNum(q.meta.wk52High, 2) : "") +
                "," + (q.valid && q.meta.wk52Low > 0.0 ? CsvNum(q.meta.wk52Low, 2) : "") + "\r\n";
     }
@@ -1341,6 +1460,39 @@ void App::OnExportChart() {
     std::wstring err;
     if (!WriteTextFile(path, csv, err)) { SetStatus(err); return; }
     SetStatus(L"Exported " + std::to_wstring(q.series.count) + L" bars to " + path);
+}
+
+// File > Import from TD: a WebBroker Holdings or Activity CSV becomes
+// [holdings] or [transactions] lines, after a summary the user confirms.
+void App::OnImportBroker() {
+    std::wstring path;
+    if (!OpenCsvDialog(path)) { return; }
+    std::string bytes;
+    std::wstring err;
+    if (!ReadWholeFile(path, bytes, err)) { SetStatus(err); return; }
+    auto result = std::make_unique<ImportResult>();
+    if (!ParseBrokerCsv(DecodeTextFile(bytes), *result, err)) {
+        MessageBoxW(hwnd_, err.c_str(), L"Import from TD", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    auto plan = std::make_unique<ImportPlan>();
+    BuildImportPlan(*result, cfg_.path, *plan);
+    if (plan->count == 0) {
+        MessageBoxW(hwnd_, L"No buys, sells or positions were found in that file.", L"Import from TD", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    bool addUnknown = false;
+    const std::wstring title = L"From " + path;
+    if (!RunImportDialog(hInst_, hwnd_, title, DescribeImportPlan(*plan), addUnknown)) { return; }
+    size_t written = 0;
+    if (!ApplyImportPlan(*plan, cfg_, addUnknown, written, err)) {
+        SetStatus(L"Import failed: " + err);
+        OnReloadConfig();          // pick up whatever was written before the failure
+        return;
+    }
+    OnReloadConfig();
+    SetStatus(L"Imported " + std::to_wstring(written) + L" symbol" + (written == 1 ? L"" : L"s") +
+              (plan->holdings ? L" (holdings)" : L" (transactions)") + L" from " + path);
 }
 
 // ---------------------------------------------------------------------------
@@ -1389,9 +1541,7 @@ void App::OnCommand(int id, UINT code) {
         return;
     }
     switch (id) {
-    case IDC_STYLE:
     case IDM_CANDLES:   ToggleOption(state_.candles); break;
-    case IDC_COMPARE:
     case IDM_COMPARE:   ToggleOption(state_.compare); RequestChart(false); break;
     case IDM_SMA20:     ToggleOption(state_.sma20); break;
     case IDM_SMA50:     ToggleOption(state_.sma50); break;
@@ -1399,6 +1549,9 @@ void App::OnCommand(int id, UINT code) {
     case IDM_RSI:       ToggleOption(state_.rsi); break;
     case IDM_INSET:     ToggleOption(state_.inset); RequestInset(false); break;
     case IDM_NEWS:      ToggleOption(state_.news); Layout(); RequestNews(false); RedrawAll(); break;
+    case IDM_BENCHMARK: ToggleOption(state_.benchmark); RequestBench(); break;
+    case IDM_TRANSACTIONS: OnEditTransactions(); break;
+    case IDM_HEALTH:    OnShowHealth(); break;
     case IDM_THEME_SYSTEM: SetThemeMode(ThemeMode::System); break;
     case IDM_THEME_LIGHT:  SetThemeMode(ThemeMode::Light); break;
     case IDM_THEME_DARK:   SetThemeMode(ThemeMode::Dark); break;
@@ -1415,6 +1568,7 @@ void App::OnCommand(int id, UINT code) {
     case IDM_RELOAD:    OnReloadConfig(); break;
     case IDM_EXPORT_LIST:  OnExportList(); break;
     case IDM_EXPORT_CHART: OnExportChart(); break;
+    case IDM_IMPORT_BROKER: OnImportBroker(); break;
     case IDC_ADD:
     case IDM_ADD:       OnAddTicker(); break;
     case IDM_EDIT:      OnEditTicker(); break;
@@ -1430,6 +1584,7 @@ void App::OnCommand(int id, UINT code) {
     case IDM_TRAY_SHOW: ShowFromTray(); break;
     case IDM_TRAY_EXIT:
     case IDM_EXIT:      PostMessageW(hwnd_, WM_CLOSE, 0, 0); break;
+    case IDM_HELP:      ShowHelpWindow(hInst_, hwnd_, theme_->dark); break;
     case IDM_ABOUT: {
         const std::wstring text = std::wstring(L"StockTool ") + kVersionText +
             L"\n\nWin32 C++ stock watch list and charts.\nData: Yahoo Finance (unofficial endpoints).\n\n"
@@ -1464,6 +1619,7 @@ void App::OnTimer() {
     RequestChart(false);
     RequestInset(false);
     RequestNews(false);
+    RequestBench();
     for (size_t i = 0; i < kMaxFx; ++i) {
         if (fx_[i].valid) { fetcher_.EnqueueFx(fx_[i].from, fx_[i].to); }
     }
@@ -1620,7 +1776,7 @@ void App::OnSummaryReady(size_t stock) {
     CheckAlerts(stock, ComputeChange(q));
     UpdateTrayTip();
     InvalidateListItem(stock);
-    if (cfg_.stocks[stock].holding.qty > 0.0) { EnsureFxRates(); }
+    if (PositionOf(stock).qty > 0.0) { EnsureFxRates(); }
     if (ComputePortfolio().any) {
         if (portfolioRect_.bottom == portfolioRect_.top) { Layout(); }
         InvalidateRect(hwnd_, &portfolioRect_, FALSE);
@@ -1661,7 +1817,7 @@ void App::OnInsetReady(size_t stock, size_t range) {
         }
         PrefetchOthers();
     }
-    if (cfg_.stocks[stock].holding.qty > 0.0) { InvalidateRect(hwnd_, &portfolioRect_, FALSE); }
+    if (PositionOf(stock).qty > 0.0 || cfg_.stocks[stock].txCount > 0) { InvalidateRect(hwnd_, &portfolioRect_, FALSE); }
 }
 
 void App::OnQuoteReady() {
@@ -1693,6 +1849,83 @@ void App::OnNewsReady(size_t stock) {
     if (stock == selected_) { InvalidateRect(hwnd_, &newsRect_, FALSE); }
 }
 
+void App::OnBenchReady(size_t range) {
+    if (range != range_) { return; }
+    QuoteData& fresh = *incoming_;
+    if (!fetcher_.CopyBench(range, fresh)) { return; }
+    if (!SameSymbol(fresh.symbol, cfg_.benchmark)) { return; }
+    const bool changed = !benchValid_ || !SameBars(*bench_, fresh);
+    if (changed) { *bench_ = fresh; }
+    benchValid_ = true;
+    if (changed && state_.benchmark) { RedrawChart(); }
+}
+
+void App::OnBackoff(size_t seconds) {
+    SetStatus(L"The data provider is rate limiting us (HTTP 429); pausing fetches for " +
+              std::to_wstring(seconds / 60) + L" min");
+}
+
+void App::OnEditTransactions() {
+    if (!HasStocks()) { return; }
+    StockEntry& e = cfg_.stocks[selected_];
+    std::array<Transaction, kMaxTxPerSymbol> tx = e.tx;
+    size_t count = e.txCount;
+    if (!RunTransactionsDialog(hInst_, hwnd_, e.symbol, tx, count)) { return; }
+    std::wstring err;
+    if (!WriteTransactions(cfg_.path, e.symbol, tx.data(), count, err)) {
+        SetStatus(err);
+        return;
+    }
+    e.tx      = tx;
+    e.txCount = count;
+    fetcher_.UpdateConfig(cfg_);
+    EnsureFxRates();
+    if (count > 0 && !insetValid_[selected_]) { RequestInset(false); }   // for dividends received
+    Layout();
+    RedrawAll();
+    SetStatus(std::to_wstring(count) + L" transaction(s) saved for " + e.symbol);
+}
+
+std::wstring App::HealthText() {
+    Fetcher::Health h;
+    fetcher_.CopyHealth(h);
+    const int64_t now = UnixNow();
+    auto ago = [now](int64_t t) -> std::wstring {
+        if (t <= 0) { return L"never"; }
+        const int64_t d = now - t;
+        if (d < 60) { return std::to_wstring(d) + L" s ago"; }
+        if (d < 3600) { return std::to_wstring(d / 60) + L" min ago"; }
+        return FormatDate(t, 0, DateStyle::FullTime) + L" UTC";
+    };
+    std::wstring out = L"Endpoint       Status  Latency   Last OK          Fails  Last error\r\n";
+    out += L"-------------  ------  --------  ---------------  -----  ----------------------------------------\r\n";
+    for (const EndpointHealth& e : h.endpoints) {
+        std::array<wchar_t, 512> line{};
+        swprintf_s(line.data(), line.size(), L"%-13s  %6s  %6s  %-15s  %5u  %s\r\n",
+                   e.name,
+                   e.lastStatus > 0 ? std::to_wstring(e.lastStatus).c_str() : L"-",
+                   e.lastMs > 0 ? (std::to_wstring(e.lastMs) + L" ms").c_str() : L"-",
+                   ago(e.lastOk).c_str(),
+                   e.failures,
+                   e.lastError.c_str());
+        out += line.data();
+    }
+    out += L"\r\n";
+    if (h.backoffUntil > now) {
+        out += L"Rate-limit backoff: paused for another " + std::to_wstring(h.backoffUntil - now) + L" s (provider sent HTTP 429)\r\n";
+    } else {
+        out += L"Rate-limit backoff: none\r\n";
+    }
+    out += L"Jobs waiting in the fetch queue: " + std::to_wstring(h.pending) + L"\r\n";
+    out += L"Config: " + cfg_.path + L"\r\n";
+    out += L"\r\nRefreshes every 2 s. Esc closes.\r\n";
+    return out;
+}
+
+void App::OnShowHealth() {
+    ShowHealthWindow(hInst_, hwnd_, theme_->dark, [this]() { return HealthText(); });
+}
+
 // ---------------------------------------------------------------------------
 // Chart input / inset dragging
 
@@ -1711,6 +1944,9 @@ ChartInput App::BuildChartInput() {
     in.insetLabel     = kRanges[cfg_.insetRange].label;
     in.insetX         = state_.insetX;
     in.insetY         = state_.insetY;
+    in.opts.benchmark = state_.benchmark && !cfg_.benchmark.empty();
+    in.bench          = benchValid_ ? bench_.get() : nullptr;
+    in.benchLabel     = cfg_.benchmark.c_str();
     in.compare        = state_.compare;
     for (size_t i = 0; i < cfg_.stockCount; ++i) {
         compareEntries_[i].data   = chartValid_[i] ? &(*charts_)[i] : nullptr;
@@ -1865,19 +2101,23 @@ void App::PaintHeader(Graphics& g) {
     if (!pc.valid) { return; }
 
     // Holding line (third row) when a position exists.
-    const Holding& hd = entry.holding;
-    if (hd.qty > 0.0) {
-        const double value = hd.qty * pc.last;
-        const double cost  = hd.qty * hd.cost;
-        std::wstring line = L"Holding " + FormatMoney(hd.qty) + L" sh";
-        if (hd.cost > 0.0) { line += L" @ " + FormatPrice(hd.cost); }
+    const Position pos = PositionOf(selected_);
+    const bool hasTx = entry.txCount > 0;
+    if (pos.qty > 0.0 || (hasTx && pos.realised != 0.0)) {
+        const double value = pos.qty * pc.last;
+        const double cost  = pos.cost;
+        std::wstring line = L"Holding " + FormatMoney(pos.qty) + L" sh";
+        if (pos.acb > 0.0) { line += (hasTx ? L" @ ACB " : L" @ ") + FormatPrice(pos.acb); }
         line += L"  ·  Value " + FormatMoney(value);
         if (cost > 0.0) {
-            line += L"  ·  Gain " + FormatSignedMoney(value - cost) + L" (" + FormatPct((value - cost) / cost * 100.0) + L")";
+            line += (hasTx ? L"  ·  Unrealised " : L"  ·  Gain ") + FormatSignedMoney(value - cost) + L" (" + FormatPct((value - cost) / cost * 100.0) + L")";
         }
-        line += L"  ·  Day " + FormatSignedMoney(hd.qty * pc.change);
+        if (hasTx && pos.realised != 0.0) { line += L"  ·  Realised " + FormatSignedMoney(pos.realised); }
+        line += L"  ·  Day " + FormatSignedMoney(pos.qty * pc.change);
+        const double rec = DividendsReceivedFor(selected_);
+        if (hasTx && !std::isnan(rec) && rec > 0.0) { line += L"  ·  Dividends received " + FormatMoney(rec); }
         const double div = TrailingDividends(selected_);
-        if (!std::isnan(div) && div > 0.0) { line += L"  ·  Income ~" + FormatMoney(hd.qty * div) + L"/yr"; }
+        if (!std::isnan(div) && div > 0.0 && pos.qty > 0.0) { line += L"  ·  Income ~" + FormatMoney(pos.qty * div) + L"/yr"; }
         SolidBrush gainBrush((cost > 0.0 && value < cost) ? th.down : th.up);
         g.DrawString(line.c_str(), -1, &subFont, RectF(rc.X, rc.Y + 50.0f * scale_, rc.Width, 20.0f * scale_), &left, &gainBrush);
     }
@@ -1914,19 +2154,33 @@ void App::PaintPortfolio(Graphics& g) {
     if (p.partial) { value = L"… " + value; }   // an FX rate is still on its way
     g.DrawString(value.c_str(), -1, &valueFont, RectF(rc.X, rc.Y + 1.0f * scale_, rc.Width - pad, 20.0f * scale_), &right, &dark);
 
+    // Line 2: today's move on the left, gain since cost on the right.
     std::wstring line = L"Day " + FormatSignedMoney(p.day);
     if (p.value > 0.0) { line += L" (" + FormatPct(p.day / (p.value - p.day) * 100.0) + L")"; }
-    if (p.cost > 0.0) {
-        line += L"   Total " + FormatSignedMoney(p.value - p.cost) + L" (" + FormatPct((p.value - p.cost) / p.cost * 100.0) + L")";
-    }
     SolidBrush dayBrush(p.day >= 0.0 ? th.up : th.down);
     StringFormat nowrap;
     nowrap.SetFormatFlags(StringFormatFlagsNoWrap);
     nowrap.SetTrimming(StringTrimmingEllipsisCharacter);
-    g.DrawString(line.c_str(), -1, &subFont, RectF(rc.X + pad, rc.Y + 24.0f * scale_, rc.Width - 2 * pad, 16.0f * scale_), &nowrap, &dayBrush);
+    const RectF line2(rc.X + pad, rc.Y + 24.0f * scale_, rc.Width - 2 * pad, 16.0f * scale_);
+    g.DrawString(line.c_str(), -1, &subFont, line2, &nowrap, &dayBrush);
+    if (p.cost > 0.0) {
+        const double gain = p.value - p.cost;
+        const std::wstring total = L"Total " + FormatSignedMoney(gain) + L" (" + FormatPct(gain / p.cost * 100.0) + L")";
+        SolidBrush gainBrush(gain >= 0.0 ? th.up : th.down);
+        StringFormat rightNoWrap;
+        rightNoWrap.SetAlignment(StringAlignmentFar);
+        rightNoWrap.SetFormatFlags(StringFormatFlagsNoWrap);
+        g.DrawString(total.c_str(), -1, &subFont, line2, &rightNoWrap, &gainBrush);
+    }
     if (p.income > 0.0) {
-        const std::wstring income = L"Dividend income ~" + FormatMoney(p.income) + L" " + cfg_.portfolioCurrency + L"/yr";
-        g.DrawString(income.c_str(), -1, &subFont, RectF(rc.X + pad, rc.Y + 40.0f * scale_, rc.Width - 2 * pad, 16.0f * scale_), &nowrap, &grey);
+        const std::wstring third = L"Dividend income ~" + FormatMoney(p.income) + L" " + cfg_.portfolioCurrency + L"/yr";
+        g.DrawString(third.c_str(), -1, &subFont, RectF(rc.X + pad, rc.Y + 40.0f * scale_, rc.Width - 2 * pad, 16.0f * scale_), &nowrap, &grey);
+    }
+    std::wstring fourth;
+    if (p.realised != 0.0) { fourth += L"Realised " + FormatSignedMoney(p.realised); }
+    if (p.received > 0.0) { fourth += (fourth.empty() ? L"" : L"   ") + std::wstring(L"Dividends received ") + FormatMoney(p.received); }
+    if (!fourth.empty()) {
+        g.DrawString(fourth.c_str(), -1, &subFont, RectF(rc.X + pad, rc.Y + 56.0f * scale_, rc.Width - 2 * pad, 16.0f * scale_), &nowrap, &grey);
     }
 }
 
@@ -2070,7 +2324,8 @@ void App::PaintListItem(Graphics& g, const RECT& rcItem, size_t index, bool sele
 
     const float textW = rc.Width * 0.6f;
     std::wstring sym = entry.symbol;
-    if (entry.holding.qty > 0.0) { sym += L"  · " + FormatMoney(entry.holding.qty) + L" sh"; }
+    const double held = PositionOf(index).qty;
+    if (held > 0.0) { sym += L"  · " + FormatMoney(held) + L" sh"; }
     if (alerting) { sym += L"  ⚠"; }
     g.DrawString(sym.c_str(), -1, &symFont, RectF(rc.X + pad, rc.Y + 5.0f * scale_, textW, 18.0f * scale_), &left, &dark);
     g.DrawString(entry.name.c_str(), -1, &subFont, RectF(rc.X + pad, rc.Y + 24.0f * scale_, textW, 16.0f * scale_), &left, &grey);

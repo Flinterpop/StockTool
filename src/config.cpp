@@ -1,4 +1,5 @@
 #include "config.h"
+#include "textfmt.h"
 
 #include <shlobj.h>
 
@@ -26,6 +27,10 @@ constexpr wchar_t kDefaultSearchUrlTemplate[] =
 constexpr wchar_t kDefaultNewsUrlTemplate[] =
     L"https://query2.finance.yahoo.com/v1/finance/search?q={symbol}&quotesCount=0&newsCount=8&listsCount=0";
 
+// Google News, Canadian English edition, searched by company name.
+constexpr wchar_t kDefaultNewsRssTemplate[] =
+    L"https://news.google.com/rss/search?q={query}&hl=en-CA&gl=CA&ceid=CA:en";
+
 constexpr char kDefaultConfigText[] =
     "; StockTool configuration.\r\n"
     "; Symbols use Yahoo Finance notation: TSX = .TO, TSX Venture = .V,\r\n"
@@ -42,14 +47,18 @@ constexpr char kDefaultConfigText[] =
     "minimize_to_tray=0\r\n"
     "; Portfolio totals are converted into this currency.\r\n"
     "portfolio_currency=CAD\r\n"
+    "; Index drawn over the chart when View > Benchmark is on (^GSPTSE = S&P/TSX Composite, ^GSPC = S&P 500).\r\n"
+    "benchmark=^GSPTSE\r\n"
     "url_template=https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
     "?range={range}&interval={interval}&includePrePost=false&events=div\r\n"
     "; Fundamentals (market cap, P/E, yield). Leave empty to disable.\r\n"
     "quote_url_template=https://query2.finance.yahoo.com/v7/finance/quote?symbols={symbols}&crumb={crumb}\r\n"
     "; Symbol search in the Add dialog. Leave empty to disable.\r\n"
     "search_url_template=https://query2.finance.yahoo.com/v1/finance/search?q={query}&quotesCount=12&newsCount=0&listsCount=0\r\n"
-    "; Headlines pane. Leave empty to disable.\r\n"
+    "; Headlines pane: google (Google News, Canadian edition, by company name), yahoo, or none.\r\n"
+    "news_source=google\r\n"
     "news_url_template=https://query2.finance.yahoo.com/v1/finance/search?q={symbol}&quotesCount=0&newsCount=8&listsCount=0\r\n"
+    "news_rss_template=https://news.google.com/rss/search?q={query}&hl=en-CA&gl=CA&ceid=CA:en\r\n"
     "\r\n"
     "; Default watch list. Extra lists live in [stocks.<name>] sections.\r\n"
     "[stocks]\r\n"
@@ -66,7 +75,13 @@ constexpr char kDefaultConfigText[] =
     "[alerts]\r\n"
     "\r\n"
     "; symbol=CAD   (currency override when the provider labels a listing oddly)\r\n"
-    "[currency]\r\n";
+    "[currency]\r\n"
+    "\r\n"
+    "; SYMBOL.N=YYYY-MM-DD,shares,price   (written by Ticker > Transactions...; negative shares = sell)\r\n"
+    "[transactions]\r\n"
+    "\r\n"
+    "; broker symbol=watch-list symbol   (File > Import from TD...; e.g. TDB902=0P0000A30L)\r\n"
+    "[symbol_map]\r\n";
 
 constexpr size_t kSectionBufChars = 8192;
 constexpr wchar_t kSettings[] = L"settings";
@@ -74,6 +89,8 @@ constexpr wchar_t kStocks[]   = L"stocks";
 constexpr wchar_t kHoldings[] = L"holdings";
 constexpr wchar_t kAlerts[]   = L"alerts";
 constexpr wchar_t kCurrency[] = L"currency";
+constexpr wchar_t kTransactions[] = L"transactions";
+constexpr wchar_t kSymbolMap[] = L"symbol_map";
 constexpr wchar_t kState[]    = L"state";
 constexpr wchar_t kListPrefix[] = L"stocks.";
 
@@ -172,6 +189,7 @@ bool ReadStockSection(const std::wstring& path, const std::wstring& section, Con
         e.currency = ReadString(path, kCurrency, e.symbol.c_str(), L"");
         std::wstring ignored;
         if (!NormalizeCurrency(e.currency, ignored)) { e.currency.clear(); }
+        ReadTransactions(path, e);
         out.stocks[out.stockCount] = e;
         ++out.stockCount;
     }
@@ -217,6 +235,23 @@ bool DirectoryWritable(const std::wstring& dir) {
 }
 
 } // namespace
+
+// [transactions] SYMBOL.N=YYYY-MM-DD,qty,price for N = 1.. until a key is missing.
+void ReadTransactions(const std::wstring& path, StockEntry& e) {
+    e.txCount = 0;
+    for (size_t n = 1; n <= kMaxTxPerSymbol; ++n) {
+        const std::wstring key = e.symbol + L"." + std::to_wstring(n);
+        const std::wstring value = ReadString(path, kTransactions, key.c_str(), L"");
+        if (value.empty()) { break; }
+        Transaction t;
+        std::array<wchar_t, 16> date{};
+        if (swscanf_s(value.c_str(), L"%15[^,],%lf,%lf", date.data(), static_cast<unsigned>(date.size()), &t.qty, &t.price) != 3) { continue; }
+        if (!ParseIsoDate(date.data(), t.date) || t.qty == 0.0 || t.price < 0.0) { continue; }
+        e.tx[e.txCount] = t;
+        ++e.txCount;
+    }
+    assert(e.txCount <= kMaxTxPerSymbol);
+}
 
 std::wstring DefaultConfigPath() {
     std::array<wchar_t, MAX_PATH> exe{};
@@ -285,6 +320,10 @@ bool LoadConfig(const std::wstring& path, const std::wstring& listName, Config& 
         out.portfolioCurrency = L"CAD";
     }
 
+    out.benchmark = ReadString(path, kSettings, L"benchmark", L"^GSPTSE");
+    std::wstring benchErr;
+    if (!out.benchmark.empty() && !NormalizeSymbol(out.benchmark, benchErr)) { out.benchmark.clear(); }
+
     out.urlTemplate = ReadString(path, kSettings, L"url_template", kDefaultUrlTemplate);
     if (out.urlTemplate.find(L"{symbol}") == std::wstring::npos) {
         err = L"url_template must contain {symbol}";
@@ -304,6 +343,19 @@ bool LoadConfig(const std::wstring& path, const std::wstring& listName, Config& 
     if (!out.newsUrlTemplate.empty() && out.newsUrlTemplate.find(L"{symbol}") == std::wstring::npos) {
         err = L"news_url_template must contain {symbol} (or be empty)";
         return false;
+    }
+    out.newsRssTemplate = ReadString(path, kSettings, L"news_rss_template", kDefaultNewsRssTemplate);
+    if (!out.newsRssTemplate.empty() && out.newsRssTemplate.find(L"{query}") == std::wstring::npos) {
+        err = L"news_rss_template must contain {query} (or be empty)";
+        return false;
+    }
+    const std::wstring source = ReadString(path, kSettings, L"news_source", L"google");
+    if (_wcsicmp(source.c_str(), L"yahoo") == 0)      { out.newsSource = NewsSource::Yahoo; }
+    else if (_wcsicmp(source.c_str(), L"none") == 0)  { out.newsSource = NewsSource::None; }
+    else                                               { out.newsSource = NewsSource::Google; }
+    if ((out.newsSource == NewsSource::Yahoo && out.newsUrlTemplate.empty()) ||
+        (out.newsSource == NewsSource::Google && out.newsRssTemplate.empty())) {
+        out.newsSource = NewsSource::None;   // the chosen source has no template
     }
 
     ReadListNames(path, out);
@@ -341,6 +393,7 @@ void LoadViewState(const std::wstring& path, ViewState& out) {
     out.rsi       = ReadBool(path, kState, L"rsi", false);
     out.inset     = ReadBool(path, kState, L"inset", true);
     out.news      = ReadBool(path, kState, L"news", false);
+    out.benchmark = ReadBool(path, kState, L"benchmark", false);
     double ix = 0.0;
     double iy = 0.0;
     ParsePair(ReadString(path, kState, L"inset_pos", L""), ix, iy);
@@ -368,6 +421,7 @@ bool SaveViewState(const std::wstring& path, const ViewState& s, std::wstring& e
         { L"rsi",       s.rsi ? L"1" : L"0" },
         { L"inset",     s.inset ? L"1" : L"0" },
         { L"news",      s.news ? L"1" : L"0" },
+        { L"benchmark", s.benchmark ? L"1" : L"0" },
         { L"inset_pos", FormatPair(s.insetX, s.insetY) },
         { L"selected",  s.selected },
         { L"list",      s.list },
@@ -469,6 +523,7 @@ bool WriteStockEntry(const Config& cfg, const StockEntry& entry, std::wstring& e
     if (holdingSet && !WriteHolding(cfg.path, entry.symbol, entry.holding, err)) { return false; }
     if (alertSet && !WriteAlert(cfg.path, entry.symbol, entry.alert, err)) { return false; }
     if (!entry.currency.empty() && !WriteCurrency(cfg.path, entry.symbol, entry.currency, err)) { return false; }
+    if (entry.txCount > 0 && !WriteTransactions(cfg.path, entry.symbol, entry.tx.data(), entry.txCount, err)) { return false; }
     return true;
 }
 
@@ -486,7 +541,8 @@ bool DeleteStockEntry(const Config& cfg, const std::wstring& symbol, std::wstrin
     }
     if (!WriteString(cfg.path, kHoldings, symbol.c_str(), nullptr, err)) { return false; }
     if (!WriteString(cfg.path, kAlerts, symbol.c_str(), nullptr, err)) { return false; }
-    return WriteString(cfg.path, kCurrency, symbol.c_str(), nullptr, err);
+    if (!WriteString(cfg.path, kCurrency, symbol.c_str(), nullptr, err)) { return false; }
+    return WriteTransactions(cfg.path, symbol, nullptr, 0, err);
 }
 
 bool WriteStockOrder(const Config& cfg, std::wstring& err) {
@@ -559,6 +615,78 @@ bool WriteAlert(const std::wstring& path, const std::wstring& symbol, const Aler
     const bool unset = (a.above == 0.0 && a.below == 0.0);
     return WriteString(path, kAlerts, symbol.c_str(),
                        unset ? nullptr : FormatPair(a.above, a.below).c_str(), err);
+}
+
+size_t ReadAllSymbols(const std::wstring& path, std::wstring* out, size_t max) {
+    assert(out != nullptr || max == 0);
+    Config names;
+    ReadListNames(path, names);
+    size_t count = 0;
+    for (size_t l = 0; l < names.listCount && count < max; ++l) {
+        std::array<wchar_t, kSectionBufChars> buf{};
+        const DWORD n = GetPrivateProfileSectionW(ListSection(names.lists[l]).c_str(), buf.data(),
+                                                  static_cast<DWORD>(buf.size()), path.c_str());
+        size_t pos = 0;
+        for (size_t guard = 0; guard < kSectionBufChars && pos < n && count < max; ++guard) {
+            const wchar_t* entry = buf.data() + pos;
+            const size_t len = wcsnlen_s(entry, buf.size() - pos);
+            if (len == 0) { break; }
+            pos += len + 1;
+            StockEntry e;
+            if (!SplitEntry(entry, e)) { continue; }
+            bool dup = false;
+            for (size_t k = 0; k < count && !dup; ++k) { dup = _wcsicmp(out[k].c_str(), e.symbol.c_str()) == 0; }
+            if (dup) { continue; }
+            out[count] = e.symbol;
+            ++count;
+        }
+    }
+    assert(count <= max);
+    return count;
+}
+
+size_t ReadSymbolMap(const std::wstring& path, SymbolMapEntry* out, size_t max) {
+    assert(out != nullptr || max == 0);
+    std::array<wchar_t, kSectionBufChars> buf{};
+    const DWORD n = GetPrivateProfileSectionW(kSymbolMap, buf.data(), static_cast<DWORD>(buf.size()), path.c_str());
+    size_t count = 0;
+    size_t pos = 0;
+    for (size_t guard = 0; guard < kSectionBufChars && pos < n && count < max; ++guard) {
+        const wchar_t* entry = buf.data() + pos;
+        const size_t len = wcsnlen_s(entry, buf.size() - pos);
+        if (len == 0) { break; }
+        pos += len + 1;
+        const std::wstring line(entry);
+        const size_t eq = line.find(L'=');
+        if (eq == std::wstring::npos || line[0] == L';') { continue; }
+        std::wstring from = Trim(line.substr(0, eq));
+        std::wstring to   = Trim(line.substr(eq + 1));
+        std::wstring ignored;
+        if (from.empty() || !NormalizeSymbol(to, ignored)) { continue; }
+        for (wchar_t& c : from) { c = static_cast<wchar_t>(std::towupper(c)); }
+        out[count] = SymbolMapEntry{ from, to };
+        ++count;
+    }
+    assert(count <= max);
+    return count;
+}
+
+bool WriteTransactions(const std::wstring& path, const std::wstring& symbol,
+                       const Transaction* tx, size_t count, std::wstring& err) {
+    assert(!symbol.empty());
+    assert(count == 0 || tx != nullptr);
+    for (size_t n = 1; n <= kMaxTxPerSymbol; ++n) {
+        const std::wstring key = symbol + L"." + std::to_wstring(n);
+        const wchar_t* value = nullptr;
+        std::array<wchar_t, 96> buf{};
+        if (n <= count) {
+            const Transaction& t = tx[n - 1];
+            swprintf_s(buf.data(), buf.size(), L"%s,%.4f,%.4f", FormatIsoDate(t.date).c_str(), t.qty, t.price);
+            value = buf.data();
+        }
+        if (!WriteString(path, kTransactions, key.c_str(), value, err)) { return false; }
+    }
+    return true;
 }
 
 bool WriteCurrency(const std::wstring& path, const std::wstring& symbol, const std::wstring& code, std::wstring& err) {

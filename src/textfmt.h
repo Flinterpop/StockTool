@@ -25,4 +25,8 @@ std::wstring FormatCompact(double v);                     // 1.23T / 45.6B / 1.2
 std::wstring FormatRatio(double v);                       // 12.34 (0 -> "-")
 std::wstring FormatDate(int64_t unixTime, int32_t gmtOffsetSec, DateStyle style);
 
+// ISO dates for the config file and dialogs: "2026-09-20" <-> Unix seconds at 00:00 UTC.
+std::wstring FormatIsoDate(int64_t unixTime);
+bool ParseIsoDate(const std::wstring& text, int64_t& unixTime);   // false on junk
+
 } // namespace st

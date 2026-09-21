@@ -11,11 +11,16 @@ struct StockEntry {
     std::wstring symbol;
     std::wstring name;
     std::wstring currency;   // override for the provider's currency ("" = provider)
-    Holding      holding;
+    Holding      holding;    // manual position (ignored when transactions exist)
     Alert        alert;
+    std::array<Transaction, kMaxTxPerSymbol> tx{};
+    size_t       txCount = 0;
 };
 
 enum class ThemeMode { System, Light, Dark };
+
+// Where headlines come from.
+enum class NewsSource { None, Yahoo, Google };
 
 // User-editable settings: [settings], the active watch list's [stocks...]
 // section, plus [holdings], [alerts], [currency] (all keyed by symbol and
@@ -33,10 +38,13 @@ struct Config {
     bool         startMinimized = false;
     bool         minimizeToTray = false;
     std::wstring portfolioCurrency;          // totals converted into this ("" = CAD)
+    std::wstring benchmark;                  // index symbol for the benchmark overlay ("" = off)
     std::wstring urlTemplate;                // chart endpoint
     std::wstring quoteUrlTemplate;           // batch fundamentals endpoint ("" = off)
     std::wstring searchUrlTemplate;          // symbol search endpoint ("" = off)
-    std::wstring newsUrlTemplate;            // headlines endpoint ("" = off)
+    NewsSource   newsSource = NewsSource::Google;
+    std::wstring newsUrlTemplate;            // Yahoo headlines endpoint ({symbol})
+    std::wstring newsRssTemplate;            // Google News RSS endpoint ({query})
     std::wstring path;
 };
 
@@ -54,6 +62,7 @@ struct ViewState {
     bool   rsi       = false;
     bool   inset     = true;
     bool   news      = false;
+    bool   benchmark = false;
     float  insetX    = 0.0f;            // inset position, fractions of the free plot space
     float  insetY    = 0.0f;
     std::wstring selected;              // symbol
@@ -107,5 +116,19 @@ bool WriteSetting(const std::wstring& path, const wchar_t* key, const std::wstri
 bool WriteHolding(const std::wstring& path, const std::wstring& symbol, const Holding& h, std::wstring& err);
 bool WriteAlert(const std::wstring& path, const std::wstring& symbol, const Alert& a, std::wstring& err);
 bool WriteCurrency(const std::wstring& path, const std::wstring& symbol, const std::wstring& code, std::wstring& err);
+
+// Every symbol of every watch list in the file (for the broker import's
+// symbol mapping). Returns how many were written to `out`.
+size_t ReadAllSymbols(const std::wstring& path, std::wstring* out, size_t max);
+
+// [symbol_map] entries: broker symbol = watch-list symbol.
+size_t ReadSymbolMap(const std::wstring& path, SymbolMapEntry* out, size_t max);
+
+// Fills e.tx/e.txCount from the [transactions] lines of e.symbol.
+void ReadTransactions(const std::wstring& path, StockEntry& e);
+
+// Replaces the [transactions] lines for `symbol` (SYMBOL.1=date,qty,price ...).
+bool WriteTransactions(const std::wstring& path, const std::wstring& symbol,
+                       const Transaction* tx, size_t count, std::wstring& err);
 
 } // namespace st

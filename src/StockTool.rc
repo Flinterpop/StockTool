@@ -9,6 +9,9 @@
 // resource is also what Explorer shows for the exe.
 IDI_APPICON ICON "StockTool.ico"
 
+// In-app user guide (Help > User guide), streamed into a RichEdit.
+IDR_HELP RCDATA "help.rtf"
+
 IDR_MAINMENU MENU
 BEGIN
     POPUP "&File"
@@ -18,6 +21,7 @@ BEGIN
         MENUITEM SEPARATOR
         MENUITEM "Export &watch list (CSV)...", IDM_EXPORT_LIST
         MENUITEM "Export &chart bars (CSV)...", IDM_EXPORT_CHART
+        MENUITEM "&Import from TD (CSV)...",  IDM_IMPORT_BROKER
         MENUITEM SEPARATOR
         MENUITEM "E&xit",                  IDM_EXIT
     END
@@ -33,6 +37,7 @@ BEGIN
         MENUITEM SEPARATOR
         MENUITEM "Trend &inset",           IDM_INSET
         MENUITEM "&News pane",             IDM_NEWS
+        MENUITEM "&Benchmark index",       IDM_BENCHMARK
         MENUITEM SEPARATOR
         POPUP "&Theme"
         BEGIN
@@ -51,6 +56,7 @@ BEGIN
         MENUITEM "Move &down\tCtrl+Down",  IDM_MOVEDOWN
         MENUITEM SEPARATOR
         MENUITEM "&Holding...",            IDM_HOLDING
+        MENUITEM "&Transactions...",       IDM_TRANSACTIONS
         MENUITEM "A&lerts...",             IDM_ALERTS
     END
     POPUP "&List"
@@ -62,6 +68,9 @@ BEGIN
     END
     POPUP "&Help"
     BEGIN
+        MENUITEM "&User guide	F1",        IDM_HELP
+        MENUITEM "&Data source health...", IDM_HEALTH
+        MENUITEM SEPARATOR
         MENUITEM "&About StockTool",       IDM_ABOUT
     END
 END
@@ -97,6 +106,39 @@ BEGIN
     LTEXT           "Letters, digits, spaces, - and _ (max 24).", IDC_LHINT, 7, 40, 206, 8
     DEFPUSHBUTTON   "OK", IDOK, 109, 59, 50, 14
     PUSHBUTTON      "Cancel", IDCANCEL, 163, 59, 50, 14
+END
+
+IDD_TRANSACTIONS DIALOGEX 0, 0, 330, 196
+STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Transactions"
+FONT 9, "Segoe UI", 400, 0, 1
+BEGIN
+    LTEXT           "", IDC_TTITLE, 7, 7, 316, 8
+    LISTBOX         IDC_TXLIST, 7, 18, 316, 78, LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | LBS_USETABSTOPS | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Date (YYYY-MM-DD):", -1, 7, 102, 72, 8
+    EDITTEXT        IDC_TXDATE, 7, 112, 72, 13, ES_AUTOHSCROLL
+    LTEXT           "Shares (negative = sell):", -1, 86, 102, 90, 8
+    EDITTEXT        IDC_TXQTY, 86, 112, 84, 13, ES_AUTOHSCROLL
+    LTEXT           "Price per share:", -1, 177, 102, 70, 8
+    EDITTEXT        IDC_TXPRICE, 177, 112, 70, 13, ES_AUTOHSCROLL
+    PUSHBUTTON      "Add", IDC_TXADD, 254, 111, 69, 15
+    LTEXT           "", IDC_THINT, 7, 131, 316, 8
+    LTEXT           "", IDC_TSUMMARY, 7, 145, 316, 16
+    PUSHBUTTON      "Delete selected", IDC_TXDELETE, 7, 175, 80, 14
+    DEFPUSHBUTTON   "Save", IDOK, 219, 175, 50, 14
+    PUSHBUTTON      "Cancel", IDCANCEL, 273, 175, 50, 14
+END
+
+IDD_IMPORT DIALOGEX 0, 0, 360, 230
+STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Import from TD"
+FONT 9, "Segoe UI", 400, 0, 1
+BEGIN
+    LTEXT           "", IDC_IMPORT_TITLE, 7, 7, 346, 8, SS_PATHELLIPSIS | SS_NOPREFIX
+    EDITTEXT        IDC_IMPORT_TEXT, 7, 19, 346, 164, ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL
+    AUTOCHECKBOX    "Add symbols that are not in any watch list to the current list", IDC_IMPORT_ADD, 7, 190, 346, 10
+    DEFPUSHBUTTON   "Import", IDOK, 249, 209, 50, 14
+    PUSHBUTTON      "Cancel", IDCANCEL, 303, 209, 50, 14
 END
 
 IDD_HOLDING DIALOGEX 0, 0, 220, 96

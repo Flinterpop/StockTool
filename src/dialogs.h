@@ -35,4 +35,12 @@ bool RunAlertsDialog(HINSTANCE inst, HWND owner, const std::wstring& symbol, Ale
 // Asks for a watch-list name (pre-filled with `name`); true on OK.
 bool RunListNameDialog(HINSTANCE inst, HWND owner, const std::wstring& title, std::wstring& name);
 
+// Edits a ticker's buy/sell transactions in place; true if the user pressed Save.
+bool RunTransactionsDialog(HINSTANCE inst, HWND owner, const std::wstring& symbol,
+                           std::array<Transaction, kMaxTxPerSymbol>& tx, size_t& count);
+
+// Shows an import summary; true when the user pressed Import. `addUnknown`
+// is the checkbox state (in: default, out: choice).
+bool RunImportDialog(HINSTANCE inst, HWND owner, const std::wstring& title, const std::wstring& text, bool& addUnknown);
+
 } // namespace st

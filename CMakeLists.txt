@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 # Single source of truth for the version: it flows into the code
 # (STOCKTOOL_VERSION*) and the exe's VERSIONINFO resource from here.
-project(StockTool VERSION 0.3.0 LANGUAGES CXX RC)
+project(StockTool VERSION 0.4.0 LANGUAGES CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -30,10 +30,12 @@ set(ST_OPTIONS /W4 /WX /permissive- /utf-8 /EHsc /external:W0 /Zc:__cplusplus)
 
 # ---- UI-free core: parsing, config, formatting, indicators (unit-tested) ----
 add_library(stocktool_core STATIC
+    src/brokerimport.cpp
     src/chart.cpp
     src/config.cpp
     src/http.cpp
     src/indicators.cpp
+    src/position.cpp
     src/quote_parser.cpp
     src/textfmt.cpp
     src/theme.cpp
@@ -49,6 +51,7 @@ add_executable(StockTool WIN32
     src/app.cpp
     src/dialogs.cpp
     src/fetcher.cpp
+    src/help.cpp
     src/StockTool.rc
 )
 target_compile_options(StockTool PRIVATE ${ST_OPTIONS})
@@ -71,9 +74,11 @@ add_custom_command(TARGET StockTool POST_BUILD
 if(Catch2_FOUND)
     enable_testing()
     add_executable(stocktool_tests
+        tests/test_brokerimport.cpp
         tests/test_chart_geometry.cpp
         tests/test_config.cpp
         tests/test_indicators.cpp
+        tests/test_position.cpp
         tests/test_quote_parser.cpp
         tests/test_textfmt.cpp
     )

@@ -6,6 +6,10 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstdio>
+#include <cstdlib>
+#include <ctime>
+#include <string_view>
 
 using std::min;
 
@@ -166,6 +170,134 @@ bool ParseChartJson(const char* data, size_t len, QuoteData& out, std::wstring& 
     ParseDividends(r, out);
     out.valid = true;
     assert(err.empty() || !out.valid);
+    return true;
+}
+
+namespace {
+
+// ---- A small, bounded RSS reader ------------------------------------------
+// Google News feeds are plain RSS 2.0 with escaped text; this handles the
+// elements the pane needs without pulling in an XML library.
+
+using Sv = std::string_view;
+
+// The text between <tag ...> and </tag> inside `scope`, or empty.
+Sv ElementText(Sv scope, const char* tag) {
+    const std::string open = std::string("<") + tag;
+    const size_t start = scope.find(open);
+    if (start == Sv::npos) { return {}; }
+    const size_t gt = scope.find('>', start);
+    if (gt == Sv::npos) { return {}; }
+    if (scope[gt - 1] == '/') { return {}; }   // self-closing
+    const std::string close = std::string("</") + tag + ">";
+    const size_t end = scope.find(close, gt + 1);
+    if (end == Sv::npos) { return {}; }
+    return scope.substr(gt + 1, end - gt - 1);
+}
+
+// Strips CDATA wrappers and decodes the XML entities that occur in feeds.
+std::string DecodeXml(Sv text) {
+    std::string s(text);
+    if (s.rfind("<![CDATA[", 0) == 0 && s.size() >= 12 && s.compare(s.size() - 3, 3, "]]>") == 0) {
+        s = s.substr(9, s.size() - 12);
+    }
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size() && i < 65536; ++i) {
+        if (s[i] != '&') { out += s[i]; continue; }
+        const size_t semi = s.find(';', i);
+        if (semi == std::string::npos || semi - i > 10) { out += s[i]; continue; }
+        const Sv ent(s.data() + i + 1, semi - i - 1);
+        if (ent == "amp")       { out += '&'; }
+        else if (ent == "lt")   { out += '<'; }
+        else if (ent == "gt")   { out += '>'; }
+        else if (ent == "quot") { out += '"'; }
+        else if (ent == "apos") { out += '\''; }
+        else if (!ent.empty() && ent[0] == '#') {
+            const bool hex = ent.size() > 1 && (ent[1] == 'x' || ent[1] == 'X');
+            const unsigned long cp = strtoul(std::string(ent.substr(hex ? 2 : 1)).c_str(), nullptr, hex ? 16 : 10);
+            if (cp == 0 || cp > 0x10FFFF) { out += '?'; }
+            else if (cp < 0x80) { out += static_cast<char>(cp); }
+            else if (cp < 0x800) { out += static_cast<char>(0xC0 | (cp >> 6)); out += static_cast<char>(0x80 | (cp & 0x3F)); }
+            else if (cp < 0x10000) { out += static_cast<char>(0xE0 | (cp >> 12)); out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F)); out += static_cast<char>(0x80 | (cp & 0x3F)); }
+            else { out += static_cast<char>(0xF0 | (cp >> 18)); out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F)); out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F)); out += static_cast<char>(0x80 | (cp & 0x3F)); }
+        } else { out += s[i]; continue; }
+        i = semi;
+    }
+    return out;
+}
+
+// RFC 822 date as used by RSS: "Sat, 20 Sep 2026 12:34:56 GMT". 0 if unparseable.
+int64_t ParseRfc822(const std::string& text) {
+    static const char* kMonths[12] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                       "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    int day = 0;
+    int year = 0;
+    int hh = 0;
+    int mm = 0;
+    int ss = 0;
+    std::array<char, 8> mon{};
+    // With or without the leading weekday.
+    int n = sscanf_s(text.c_str(), "%*3s, %d %3s %d %d:%d:%d", &day, mon.data(), 4, &year, &hh, &mm, &ss);
+    if (n < 5) { n = sscanf_s(text.c_str(), "%d %3s %d %d:%d:%d", &day, mon.data(), 4, &year, &hh, &mm, &ss); }
+    if (n < 5) { return 0; }
+    int month = -1;
+    for (int i = 0; i < 12; ++i) {
+        if (_strnicmp(mon.data(), kMonths[i], 3) == 0) { month = i; break; }
+    }
+    if (month < 0 || day < 1 || day > 31 || year < 1970 || year > 2200) { return 0; }
+    tm t{};
+    t.tm_mday = day;
+    t.tm_mon  = month;
+    t.tm_year = year - 1900;
+    t.tm_hour = hh;
+    t.tm_min  = mm;
+    t.tm_sec  = ss;
+    const __time64_t utc = _mkgmtime64(&t);
+    return (utc < 0) ? 0 : static_cast<int64_t>(utc);
+}
+
+} // namespace
+
+bool ParseNewsRss(const char* data, size_t len,
+                  std::array<NewsItem, kMaxNews>& out, size_t& count, std::wstring& err) {
+    assert(data != nullptr);
+    count = 0;
+    if (len == 0) {
+        err = L"Empty response";
+        return false;
+    }
+    const Sv doc(data, len);
+    if (doc.find("<rss") == Sv::npos && doc.find("<channel") == Sv::npos) {
+        err = L"Response is not an RSS feed";
+        return false;
+    }
+    size_t pos = 0;
+    for (size_t guard = 0; guard < 256 && count < kMaxNews; ++guard) {
+        const size_t start = doc.find("<item", pos);
+        if (start == Sv::npos) { break; }
+        const size_t end = doc.find("</item>", start);
+        if (end == Sv::npos) { break; }
+        const Sv item = doc.substr(start, end - start);
+        pos = end + 7;
+        NewsItem& h = out[count];
+        h = NewsItem{};
+        std::string title = DecodeXml(ElementText(item, "title"));
+        if (title.empty()) { continue; }
+        h.publisher = Utf8ToWide(DecodeXml(ElementText(item, "source")));
+        // Google titles end in " - Publisher"; drop it when the source element already says so.
+        if (!h.publisher.empty()) {
+            const std::string suffix = " - " + std::string(DecodeXml(ElementText(item, "source")));
+            if (title.size() > suffix.size() && title.compare(title.size() - suffix.size(), suffix.size(), suffix) == 0) {
+                title.resize(title.size() - suffix.size());
+            }
+        }
+        h.title = Utf8ToWide(title);
+        h.link  = Utf8ToWide(DecodeXml(ElementText(item, "link")));
+        h.time  = ParseRfc822(DecodeXml(ElementText(item, "pubDate")));
+        ++count;
+    }
+    assert(count <= kMaxNews);
     return true;
 }
 

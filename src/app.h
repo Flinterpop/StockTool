@@ -5,6 +5,7 @@
 #include "common.h"
 #include "config.h"
 #include "fetcher.h"
+#include "position.h"
 #include "theme.h"
 
 #include <shellapi.h>
@@ -22,6 +23,8 @@ public:
 
     bool Create(HINSTANCE hInst, int nCmdShow, std::wstring& err);
     int  Run();
+
+    static constexpr size_t kToolCount = 9;   // view toggles on the toolbar
 
 private:
     // Derived per-stock figures used by the list, header and portfolio strip.
@@ -43,6 +46,8 @@ private:
         double       cost    = 0.0;
         double       day     = 0.0;
         double       income  = 0.0;     // trailing-12-month dividends x shares
+        double       realised = 0.0;    // from sells recorded as transactions
+        double       received = 0.0;    // dividends actually received (transactions x ex-dates)
     };
     struct NewsCache {
         std::array<NewsItem, kMaxNews> items{};
@@ -79,6 +84,8 @@ private:
     void OnQuoteReady();
     void OnFxReady();
     void OnNewsReady(size_t stock);
+    void OnBenchReady(size_t range);
+    void OnBackoff(size_t seconds);
 
     // ticker commands
     void OnAddTicker();
@@ -88,10 +95,13 @@ private:
     void OnRemoveTicker();
     void OnMoveTicker(int delta);
     void OnEditHolding();
+    void OnEditTransactions();
     void OnEditAlerts();
+    void OnShowHealth();
     void OnReloadConfig();
     void OnExportList();
     void OnExportChart();
+    void OnImportBroker();
 
     // watch lists
     void SwitchList(const std::wstring& name);
@@ -127,6 +137,7 @@ private:
     void RequestChart(bool clearCurrent);
     void RequestInset(bool clearCurrent);
     void RequestNews(bool clearCurrent);
+    void RequestBench();
     void PrefetchOthers();
     void RequestAllSummaries();
     void RequestQuotes();
@@ -140,12 +151,17 @@ private:
     std::wstring CurrencyOf(size_t index) const;          // override or provider's
     double       RateToPortfolio(const std::wstring& cur) const;   // NaN when unknown
     double       TrailingDividends(size_t index) const;   // per share, last 365 days
+    Position     PositionOf(size_t index) const;          // from transactions, else the manual holding
+    double       DividendsReceivedFor(size_t index) const; // NaN when no inset data yet
+    std::wstring HealthText();
     Portfolio    ComputePortfolio() const;
     void CheckAlerts(size_t stock, const PriceChange& pc);
     void UpdateTrayTip();
     void ShowFromTray();
     void TrayBalloon(const std::wstring& title, const std::wstring& text);
     bool SaveCsvDialog(const wchar_t* suggested, std::wstring& path);
+    bool OpenCsvDialog(std::wstring& path);
+    static bool ReadWholeFile(const std::wstring& path, std::string& bytes, std::wstring& err);
     bool WriteTextFile(const std::wstring& path, const std::string& utf8, std::wstring& err);
 
     // painting
@@ -157,6 +173,7 @@ private:
     void PaintListItem(Gdiplus::Graphics& g, const RECT& rc, size_t index, bool selected);
 
     // layout rectangles (client px)
+    RECT toolbarRect_{};
     RECT tabsRect_{};
     RECT portfolioRect_{};
     RECT listRect_{};
@@ -172,8 +189,7 @@ private:
     HWND      hTabs_ = nullptr;
     HMENU     hMenu_ = nullptr;
     std::array<HWND, kRanges.size()> hRangeBtns_{};
-    HWND      hStyleBtn_   = nullptr;
-    HWND      hCompareBtn_ = nullptr;
+    std::array<HWND, kToolCount> hToolBtns_{};
     HWND      hRefreshBtn_ = nullptr;
     HWND      hAddBtn_     = nullptr;
     HWND      hRemoveBtn_  = nullptr;
@@ -218,6 +234,8 @@ private:
     std::unique_ptr<std::array<QuoteStats, kMaxStocks>> quotes_;
     size_t                                              quoteCount_ = 0;
     std::unique_ptr<std::array<NewsCache, kMaxStocks>>  news_;
+    std::unique_ptr<QuoteData>                          bench_;      // benchmark index at range_
+    bool                                                benchValid_ = false;
     std::array<FxRate, kMaxFx>                          fx_{};
     std::array<AlertState, kMaxStocks>                  alerts_{};
     std::array<CompareEntry, kMaxStocks>                compareEntries_{};

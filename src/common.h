@@ -118,6 +118,36 @@ struct Holding {
     double cost = 0.0;  // average cost per share
 };
 
+// A buy (qty > 0) or sell (qty < 0) on a date, at a price per share.
+constexpr size_t kMaxTxPerSymbol = 64;
+
+struct Transaction {
+    int64_t date  = 0;    // Unix seconds at 00:00 UTC of the trade date
+    double  qty   = 0.0;  // shares; negative = sell
+    double  price = 0.0;  // per share, in the ticker's currency
+};
+
+// [symbol_map] broker symbol -> watch-list symbol, for the broker import.
+constexpr size_t kMaxSymbolMap    = 32;
+constexpr size_t kMaxKnownSymbols = kMaxStocks * kMaxLists;
+
+struct SymbolMapEntry {
+    std::wstring from;
+    std::wstring to;
+};
+
+// Health of one data endpoint, for the diagnostics panel.
+struct EndpointHealth {
+    const wchar_t* name       = L"";
+    uint32_t       lastStatus = 0;     // HTTP status of the last attempt (0 = transport error / none)
+    uint32_t       lastMs     = 0;     // latency of the last attempt
+    int64_t        lastOk     = 0;     // Unix time of the last success
+    int64_t        lastFail   = 0;
+    uint32_t       failures   = 0;     // consecutive failures
+    std::wstring   lastError;
+};
+constexpr size_t kEndpointCount = 6;   // chart, fundamentals, search, fx, news, crumb
+
 struct Alert {
     double above = 0.0;  // 0 = unset
     double below = 0.0;

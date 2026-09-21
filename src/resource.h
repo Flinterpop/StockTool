@@ -3,6 +3,7 @@
 
 #define IDI_APPICON       101
 #define IDR_MAINMENU      102
+#define IDR_HELP          103   // help.rtf (RCDATA)
 
 // "Add ticker" dialog
 #define IDD_ADDTICKER     200
@@ -19,6 +20,22 @@
 #define IDC_LISTNAME      231
 #define IDC_LTITLE        232
 #define IDC_LHINT         233
+
+// "Transactions" dialog
+#define IDD_TRANSACTIONS  240
+#define IDC_TTITLE        241
+#define IDC_TXLIST        242
+#define IDC_TXDATE        243
+#define IDC_TXQTY         244
+#define IDC_TXPRICE       245
+#define IDC_TXADD         246
+#define IDC_THINT         247
+#define IDC_TSUMMARY      248
+#define IDC_TXDELETE      249
+#define IDD_IMPORT        250
+#define IDC_IMPORT_TITLE  251
+#define IDC_IMPORT_TEXT   252
+#define IDC_IMPORT_ADD    253
 
 // "Holding" dialog
 #define IDD_HOLDING       210
@@ -56,12 +73,17 @@
 #define IDM_HOLDING       1034
 #define IDM_ALERTS        1035
 #define IDM_EDIT          1036
+#define IDM_TRANSACTIONS  1037
 #define IDM_ABOUT         1040
+#define IDM_HELP          1041
+#define IDM_HEALTH        1042
 #define IDM_TRAY_SHOW     1050
 #define IDM_TRAY_EXIT     1051
 #define IDM_EXPORT_LIST   1004
 #define IDM_EXPORT_CHART  1005
+#define IDM_IMPORT_BROKER 1006
 #define IDM_NEWS          1017
+#define IDM_BENCHMARK     1018
 #define IDM_LIST_NEW      1060
 #define IDM_LIST_RENAME   1061
 #define IDM_LIST_DELETE   1062

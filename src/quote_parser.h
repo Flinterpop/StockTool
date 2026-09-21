@@ -21,4 +21,8 @@ bool ParseSearchJson(const char* data, size_t len,
 bool ParseNewsJson(const char* data, size_t len,
                    std::array<NewsItem, kMaxNews>& out, size_t& count, std::wstring& err);
 
+// RSS 2.0 feed (Google News and friends): <item> title/link/pubDate/source.
+bool ParseNewsRss(const char* data, size_t len,
+                  std::array<NewsItem, kMaxNews>& out, size_t& count, std::wstring& err);
+
 } // namespace st
