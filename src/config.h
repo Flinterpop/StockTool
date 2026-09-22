@@ -22,6 +22,9 @@ enum class ThemeMode { System, Light, Dark };
 // Where headlines come from.
 enum class NewsSource { None, Yahoo, Google };
 
+// Second chart provider tried when the primary fails (daily bars only).
+enum class FallbackProvider { None, Tmx };
+
 // User-editable settings: [settings], the active watch list's [stocks...]
 // section, plus [holdings], [alerts], [currency] (all keyed by symbol and
 // shared across lists).
@@ -45,6 +48,9 @@ struct Config {
     NewsSource   newsSource = NewsSource::Google;
     std::wstring newsUrlTemplate;            // Yahoo headlines endpoint ({symbol})
     std::wstring newsRssTemplate;            // Google News RSS endpoint ({query})
+    FallbackProvider fallback = FallbackProvider::Tmx;
+    std::wstring tmxUrl;                     // TMX Money GraphQL endpoint
+    unsigned     closedRefreshSeconds = 900; // refresh cadence while every market is closed
     std::wstring path;
 };
 
@@ -63,6 +69,7 @@ struct ViewState {
     bool   inset     = true;
     bool   news      = false;
     bool   benchmark = false;
+    bool   portfolio = false;           // portfolio-history view instead of the price chart
     float  insetX    = 0.0f;            // inset position, fractions of the free plot space
     float  insetY    = 0.0f;
     std::wstring selected;              // symbol

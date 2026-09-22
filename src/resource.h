@@ -84,6 +84,7 @@
 #define IDM_IMPORT_BROKER 1006
 #define IDM_NEWS          1017
 #define IDM_BENCHMARK     1018
+#define IDM_PORTFOLIO     1019
 #define IDM_LIST_NEW      1060
 #define IDM_LIST_RENAME   1061
 #define IDM_LIST_DELETE   1062

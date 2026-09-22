@@ -222,3 +222,67 @@ TEST_CASE("news RSS: Google News items with source, entities and RFC 822 dates")
     CHECK(out[1].time == 1789806600);                              // 2026-09-19 08:30 UTC, no weekday
     CHECK_FALSE(ParseNewsRss("<html>nope</html>", 16, out, count, err));
 }
+
+TEST_CASE("TMX JSON: newest-first bars come out ascending with meta from the last bar") {
+    const char* json =
+        "{\"data\":{\"getTimeSeriesData\":["
+        "{\"dateTime\":\"2026-09-21T16:00:00-04:00\",\"open\":286.03,\"high\":289.72,\"low\":286.03,\"close\":289.64,\"volume\":1579437},"
+        "{\"dateTime\":\"2026-09-18T16:00:00-04:00\",\"open\":284.41,\"high\":285.05,\"low\":282.05,\"close\":284.45,\"volume\":7898342},"
+        "{\"dateTime\":\"bogus\",\"open\":1,\"high\":1,\"low\":1,\"close\":1,\"volume\":1},"
+        "{\"dateTime\":\"2026-09-17T16:00:00-04:00\",\"open\":285.14,\"high\":286.77,\"low\":283.11,\"close\":284.93,\"volume\":2740252}"
+        "]}}";
+    QuoteData q;
+    std::wstring err;
+    REQUIRE(ParseTmxJson(json, strlen(json), q, err));
+    CHECK(q.valid);
+    CHECK(q.source == L"TMX");
+    REQUIRE(q.series.count == 3);
+    CHECK(q.series.pts[0].close == Approx(284.93));
+    CHECK(q.series.pts[2].close == Approx(289.64));
+    CHECK(q.series.pts[0].time < q.series.pts[1].time);
+    CHECK(q.series.pts[2].time == 1790020800);            // 2026-09-21 16:00 EDT
+    CHECK(q.meta.gmtOffsetSec == -4 * 3600);
+    CHECK(q.meta.price == Approx(289.64));
+    CHECK(q.meta.marketTime == 1790020800);
+    CHECK(q.meta.dayVolume == Approx(1579437.0));
+
+    const char* empty = "{\"data\":{\"getTimeSeriesData\":[]}}";
+    CHECK_FALSE(ParseTmxJson(empty, strlen(empty), q, err));
+    const char* gqlErr = "{\"errors\":[{\"message\":\"Cannot query field\"}],\"data\":null}";
+    CHECK_FALSE(ParseTmxJson(gqlErr, strlen(gqlErr), q, err));
+    CHECK(err.find(L"Cannot query field") != std::wstring::npos);
+    CHECK_FALSE(ParseTmxJson("nope", 4, q, err));
+}
+
+TEST_CASE("TMX symbols map from Yahoo notation") {
+    CHECK(TmxSymbol(L"RY.TO") == L"RY");
+    CHECK(TmxSymbol(L"RCI-B.TO") == L"RCI.B");
+    CHECK(TmxSymbol(L"XYZ.V") == L"XYZ");
+    CHECK(TmxSymbol(L"AAPL") == L"AAPL:US");
+    CHECK(TmxSymbol(L"BRK-B") == L"BRK.B:US");
+    CHECK(TmxSymbol(L"^GSPTSE") == L"^TSX");
+    CHECK(TmxSymbol(L"^GSPC") == L"^SPX");
+    CHECK(TmxSymbol(L"^FTSE").empty());
+    CHECK(TmxSymbol(L"USDCAD=X").empty());
+    CHECK(TmxSymbol(L"0P000071WA.TO").empty());
+    CHECK(TmxSymbol(L"BMW.DE").empty());
+    CHECK(TmxSymbol(L"").empty());
+}
+
+TEST_CASE("chart JSON: the regular trading session is read from the meta block") {
+    const char* json =
+        "{\"chart\":{\"result\":[{\"meta\":{\"currency\":\"CAD\",\"regularMarketPrice\":1.0,"
+        "\"currentTradingPeriod\":{\"regular\":{\"start\":1789997400,\"end\":1790020800}}},"
+        "\"timestamp\":[1790000000],\"indicators\":{\"quote\":[{\"open\":[1.0],\"high\":[1.0],\"low\":[1.0],\"close\":[1.0],\"volume\":[1]}]}}]}}";
+    QuoteData q;
+    std::wstring err;
+    REQUIRE(ParseChartJson(json, strlen(json), q, err));
+    CHECK(q.meta.regularStart == 1789997400);
+    CHECK(q.meta.regularEnd == 1790020800);
+    CHECK(MarketOpen(q.meta, 1790000000));
+    CHECK_FALSE(MarketOpen(q.meta, 1790020800));   // the close itself is after hours
+    CHECK_FALSE(MarketOpen(q.meta, 1789997399));
+    QuoteMeta none;
+    CHECK_FALSE(MarketOpen(none, 1790000000));
+}
+

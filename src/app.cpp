@@ -2,6 +2,7 @@
 
 #include "brokerimport.h"
 #include "dialogs.h"
+#include "history.h"
 #include "help.h"
 #include "resource.h"
 #include "textfmt.h"
@@ -41,7 +42,7 @@ constexpr int IDC_RELOAD     = 304;
 // Toolbar: one toggle per View-menu command that changes the plot. The
 // buttons use the menu command IDs, so one handler serves both.
 struct ToolSpec { int id; const wchar_t* label; int widthDip; };
-constexpr std::array<ToolSpec, 9> kTools = {{
+constexpr std::array<ToolSpec, 10> kTools = {{
     { IDM_CANDLES,   L"Candles",   70 },
     { IDM_COMPARE,   L"Compare",   72 },
     { IDM_SMA20,     L"SMA 20",    62 },
@@ -51,6 +52,7 @@ constexpr std::array<ToolSpec, 9> kTools = {{
     { IDM_INSET,     L"Inset",     58 },
     { IDM_NEWS,      L"News",      58 },
     { IDM_BENCHMARK, L"Bench",     58 },
+    { IDM_PORTFOLIO, L"History",   62 },
 }};
 static_assert(kTools.size() == App::kToolCount, "toolbar table and button array differ");
 
@@ -101,6 +103,16 @@ std::wstring TimeNow() {
 
 int64_t UnixNow() {
     return static_cast<int64_t>(_time64(nullptr));
+}
+
+// This machine's offset from UTC right now, for showing exchange times locally.
+int32_t LocalOffsetSec() {
+    TIME_ZONE_INFORMATION tz{};
+    const DWORD kind = GetTimeZoneInformation(&tz);
+    LONG bias = tz.Bias;   // minutes, UTC = local + bias
+    if (kind == TIME_ZONE_ID_DAYLIGHT) { bias += tz.DaylightBias; }
+    else if (kind == TIME_ZONE_ID_STANDARD) { bias += tz.StandardBias; }
+    return static_cast<int32_t>(-bias * 60);
 }
 
 bool SameSymbol(const std::wstring& a, const std::wstring& b) {
@@ -203,6 +215,8 @@ bool App::Create(HINSTANCE hInst, int nCmdShow, std::wstring& err) {
     quotes_    = std::make_unique<std::array<QuoteStats, kMaxStocks>>();
     news_      = std::make_unique<std::array<NewsCache, kMaxStocks>>();
     bench_     = std::make_unique<QuoteData>();
+    history_   = std::make_unique<History>();
+    LoadPortfolioHistory();
     theme_     = &ThemeFor(cfg_.theme == ThemeMode::Dark ||
                            (cfg_.theme == ThemeMode::System && SystemPrefersDark()));
 
@@ -656,6 +670,7 @@ void App::SyncViewMenu() {
     check(IDM_INSET,     state_.inset);
     check(IDM_NEWS,      state_.news);
     check(IDM_BENCHMARK, state_.benchmark);
+    check(IDM_PORTFOLIO, state_.portfolio);
     EnableMenuItem(hMenu_, IDM_BENCHMARK, MF_BYCOMMAND | (cfg_.benchmark.empty() ? MF_GRAYED : MF_ENABLED));
     check(IDM_MINTRAY,   cfg_.minimizeToTray);
     EnableMenuItem(hMenu_, IDM_NEWS, MF_BYCOMMAND | (fetcher_.NewsEnabled() || hwnd_ == nullptr ? MF_ENABLED : MF_GRAYED));
@@ -664,7 +679,7 @@ void App::SyncViewMenu() {
     CheckMenuRadioItem(hMenu_, IDM_THEME_SYSTEM, IDM_THEME_DARK, static_cast<UINT>(themeId), MF_BYCOMMAND);
     const bool flags[kTools.size()] = {
         state_.candles, state_.compare, state_.sma20, state_.sma50,
-        state_.bollinger, state_.rsi, state_.inset, state_.news, state_.benchmark,
+        state_.bollinger, state_.rsi, state_.inset, state_.news, state_.benchmark, state_.portfolio,
     };
     for (size_t i = 0; i < kTools.size(); ++i) {
         if (hToolBtns_[i] != nullptr) {
@@ -687,6 +702,7 @@ void App::ToggleOption(bool& flag) {
 // Data requests
 
 void App::RequestAllSummaries() {
+    lastRefresh_ = UnixNow();   // the off-hours cadence counts from here
     for (size_t i = 0; i < cfg_.stockCount; ++i) {
         if (!fetcher_.Enqueue(JobKind::Summary, i, 0)) { SetStatus(L"Fetch queue is full"); }
     }
@@ -732,7 +748,7 @@ void App::RequestNews(bool clearCurrent) {
 }
 
 void App::RequestBench() {
-    if (!state_.benchmark || cfg_.benchmark.empty()) { return; }
+    if (!(state_.benchmark || state_.portfolio) || cfg_.benchmark.empty()) { return; }
     fetcher_.EnqueueBench(range_);
 }
 
@@ -888,7 +904,10 @@ App::Portfolio App::ComputePortfolio() const {
         p.any = true;
         const QuoteData& q = (*summaries_)[i];
         const PriceChange pc = ComputeChange(q);
-        if (!pc.valid) { continue; }
+        if (!pc.valid) {
+            if (pos.qty > 0.0) { p.incomplete = true; }
+            continue;
+        }
         const double rate = RateToPortfolio(CurrencyOf(i));
         if (std::isnan(rate)) {
             p.partial = true;
@@ -1221,6 +1240,7 @@ void App::ApplyConfig(const Config& fresh) {
     SetTimer(hwnd_, kRefreshTimer, cfg_.refreshSeconds * 1000u, nullptr);
 
     fetcher_.UpdateConfig(cfg_);
+    LoadPortfolioHistory();
     ApplyTheme();
     SyncViewMenu();
     Layout();
@@ -1550,6 +1570,7 @@ void App::OnCommand(int id, UINT code) {
     case IDM_INSET:     ToggleOption(state_.inset); RequestInset(false); break;
     case IDM_NEWS:      ToggleOption(state_.news); Layout(); RequestNews(false); RedrawAll(); break;
     case IDM_BENCHMARK: ToggleOption(state_.benchmark); RequestBench(); break;
+    case IDM_PORTFOLIO: ToggleOption(state_.portfolio); RequestBench(); break;
     case IDM_TRANSACTIONS: OnEditTransactions(); break;
     case IDM_HEALTH:    OnShowHealth(); break;
     case IDM_THEME_SYSTEM: SetThemeMode(ThemeMode::System); break;
@@ -1563,7 +1584,7 @@ void App::OnCommand(int id, UINT code) {
         break;
     }
     case IDC_REFRESH:
-    case IDM_REFRESH:   OnTimer(); break;
+    case IDM_REFRESH:   Refresh(); break;
     case IDC_RELOAD:
     case IDM_RELOAD:    OnReloadConfig(); break;
     case IDM_EXPORT_LIST:  OnExportList(); break;
@@ -1613,7 +1634,37 @@ void App::OnContextMenu(HWND source, int x, int y) {
     TrackPopupMenu(ticker, TPM_RIGHTBUTTON, x, y, 0, hwnd_, nullptr);
 }
 
+// Off-hours the prices cannot change, so the timer only refreshes every
+// closedRefreshSeconds (still often enough to notice the next session's
+// times) and exactly when a known session opens. F5 always refreshes.
 void App::OnTimer() {
+    int64_t nextOpen = INT64_MAX;
+    if (MarketsClosed(nextOpen)) {
+        const int64_t now = UnixNow();
+        const bool due = now >= nextOpen || now - lastRefresh_ >= static_cast<int64_t>(cfg_.closedRefreshSeconds);
+        if (!due) {
+            InvalidateRect(hwnd_, &statusRect_, FALSE);   // countdown in the status line
+            return;
+        }
+    }
+    Refresh();
+}
+
+bool App::MarketsClosed(int64_t& nextOpen) const {
+    const int64_t now = UnixNow();
+    nextOpen = INT64_MAX;
+    bool known = false;
+    for (size_t i = 0; i < cfg_.stockCount; ++i) {
+        const QuoteMeta& m = (*summaries_)[i].meta;
+        if (!(*summaries_)[i].valid || m.regularStart <= 0) { continue; }
+        known = true;
+        if (MarketOpen(m, now)) { return false; }
+        if (m.regularStart > now && m.regularStart < nextOpen) { nextOpen = m.regularStart; }
+    }
+    return known;
+}
+
+void App::Refresh() {
     RequestAllSummaries();
     RequestQuotes();
     RequestChart(false);
@@ -1771,8 +1822,9 @@ void App::OnSummaryReady(size_t stock) {
         q = QuoteData{};  // result for a symbol that has since moved or gone
         return;
     }
-    if (q.valid) { SetStatus(L"Updated " + TimeNow()); }
-    else         { SetStatus(cfg_.stocks[stock].symbol + L": " + q.error); }
+    if (!q.valid)               { SetStatus(cfg_.stocks[stock].symbol + L": " + q.error); }
+    else if (!q.source.empty()) { SetStatus(cfg_.stocks[stock].symbol + L": daily data via " + q.source + L" (" + q.error + L")"); }
+    else                        { SetStatus(L"Updated " + TimeNow()); }
     CheckAlerts(stock, ComputeChange(q));
     UpdateTrayTip();
     InvalidateListItem(stock);
@@ -1780,6 +1832,7 @@ void App::OnSummaryReady(size_t stock) {
     if (ComputePortfolio().any) {
         if (portfolioRect_.bottom == portfolioRect_.top) { Layout(); }
         InvalidateRect(hwnd_, &portfolioRect_, FALSE);
+        MaybeRecordHistory();
     }
     if (stock == selected_) {
         InvalidateRect(hwnd_, &headerRect_, FALSE);
@@ -1832,6 +1885,7 @@ void App::OnFxReady() {
     if (ComputePortfolio().any) {
         if (portfolioRect_.bottom == portfolioRect_.top) { Layout(); }
         InvalidateRect(hwnd_, &portfolioRect_, FALSE);
+        MaybeRecordHistory();
     }
     InvalidateRect(hwnd_, &headerRect_, FALSE);
 }
@@ -1960,8 +2014,66 @@ ChartInput App::BuildChartInput() {
     return in;
 }
 
+PortfolioInput App::BuildPortfolioInput() {
+    PortfolioInput in;
+    in.history    = history_.get();
+    in.range      = range_;
+    in.bench      = (benchValid_ && !cfg_.benchmark.empty()) ? bench_.get() : nullptr;
+    in.benchLabel = cfg_.benchmark.c_str();
+    in.currency   = cfg_.portfolioCurrency.c_str();
+    in.hoverX     = hoverX_;
+    in.hoverY     = hoverY_;
+    in.theme      = theme_;
+    return in;
+}
+
+void App::LoadPortfolioHistory() {
+    assert(history_ != nullptr);
+    std::wstring err;
+    if (!LoadHistory(HistoryPath(cfg_.path), cfg_.listName, *history_, err)) {
+        *history_ = History{};
+        SetStatus(err);
+    }
+    lastHistoryWrite_ = 0;
+}
+
+void App::MaybeRecordHistory() {
+    assert(history_ != nullptr);
+    const Portfolio p = ComputePortfolio();
+    if (!p.any || p.partial || p.incomplete || p.value <= 0.0) { return; }
+    const int64_t now = UnixNow();
+    if (now - lastHistoryWrite_ < 60) { return; }          // a row a minute is plenty
+    const int64_t day = LocalCalendarDay(now);
+    History& h = *history_;
+    const bool sameDay = h.count > 0 && h.pts[h.count - 1].day == day;
+    if (sameDay && std::fabs(h.pts[h.count - 1].value - p.value) < 0.005 && std::fabs(h.pts[h.count - 1].cost - p.cost) < 0.005) {
+        return;                                             // nothing new to say
+    }
+    const HistoryPoint pt{ day, p.value, p.cost };
+    std::wstring err;
+    if (!RecordHistory(HistoryPath(cfg_.path), cfg_.listName, pt, cfg_.portfolioCurrency, err)) {
+        SetStatus(err);
+        lastHistoryWrite_ = now;                            // do not retry every second
+        return;
+    }
+    lastHistoryWrite_ = now;
+    if (sameDay) {
+        h.pts[h.count - 1] = pt;
+    } else {
+        if (h.count == kMaxHistoryPoints) {
+            for (size_t i = 1; i < kMaxHistoryPoints; ++i) { h.pts[i - 1] = h.pts[i]; }
+            --h.count;
+        }
+        h.pts[h.count] = pt;
+        ++h.count;
+    }
+    assert(h.count <= kMaxHistoryPoints);
+    if (state_.portfolio) { InvalidateRect(hwnd_, &chartRect_, FALSE); }
+}
+
 // `box` comes back in client coordinates, like everything the chart draws.
 bool App::InsetHit(int x, int y, RectF& box) {
+    if (state_.portfolio) { return false; }
     const POINT p{ x, y };
     if (!PtInRect(&chartRect_, p)) { return false; }
     if (!ChartInsetRect(ToRectF(chartRect_), BuildChartInput(), scale_, box)) { return false; }
@@ -2003,6 +2115,12 @@ void App::PaintChartLayer(Graphics& g, const ChartInput& in) {
     const int w = chartRect_.right - chartRect_.left;
     const int h = chartRect_.bottom - chartRect_.top;
     if (w <= 0 || h <= 0) { return; }
+    if (state_.portfolio) {
+        // Few points and no indicators: cheap enough to draw whole on every paint.
+        chartDirty_ = true;   // the cached price chart is stale once we come back
+        DrawPortfolioChart(g, ToRectF(chartRect_), BuildPortfolioInput(), scale_);
+        return;
+    }
     if (chartDC_ == nullptr || chartW_ != w || chartH_ != h) {
         if (chartDC_ != nullptr) {
             SelectObject(chartDC_, chartOld_);
@@ -2094,6 +2212,9 @@ void App::PaintHeader(Graphics& g) {
         if (sum.meta.marketTime > 0) {
             sub += L"  ·  As of " + FormatDate(sum.meta.marketTime, sum.meta.gmtOffsetSec, DateStyle::FullTime);
         }
+        if (sum.meta.regularStart > 0) {
+            sub += MarketOpen(sum.meta, UnixNow()) ? L"  ·  Market open" : L"  ·  Market closed";
+        }
     }
     g.DrawString(sub.c_str(), -1, &subFont, RectF(rc.X, rc.Y + 30.0f * scale_, nameW, 20.0f * scale_), &left, &grey);
 
@@ -2162,10 +2283,19 @@ void App::PaintPortfolio(Graphics& g) {
     nowrap.SetFormatFlags(StringFormatFlagsNoWrap);
     nowrap.SetTrimming(StringTrimmingEllipsisCharacter);
     const RectF line2(rc.X + pad, rc.Y + 24.0f * scale_, rc.Width - 2 * pad, 16.0f * scale_);
-    g.DrawString(line.c_str(), -1, &subFont, line2, &nowrap, &dayBrush);
+    std::wstring total;
     if (p.cost > 0.0) {
         const double gain = p.value - p.cost;
-        const std::wstring total = L"Total " + FormatSignedMoney(gain) + L" (" + FormatPct(gain / p.cost * 100.0) + L")";
+        total = L"Total " + FormatSignedMoney(gain) + L" (" + FormatPct(gain / p.cost * 100.0) + L")";
+        // Both on one line: drop the percentages if they would collide.
+        auto width = [&](const std::wstring& t) { RectF b; g.MeasureString(t.c_str(), -1, &subFont, PointF(0, 0), &b); return b.Width; };
+        const float room = line2.Width - 12.0f * scale_;
+        if (width(line) + width(total) > room) { line = L"Day " + FormatSignedMoney(p.day); }
+        if (width(line) + width(total) > room) { total = L"Total " + FormatSignedMoney(gain); }
+    }
+    g.DrawString(line.c_str(), -1, &subFont, line2, &nowrap, &dayBrush);
+    if (!total.empty()) {
+        const double gain = p.value - p.cost;
         SolidBrush gainBrush(gain >= 0.0 ? th.up : th.down);
         StringFormat rightNoWrap;
         rightNoWrap.SetAlignment(StringAlignmentFar);
@@ -2292,7 +2422,18 @@ void App::PaintStatus(Graphics& g) {
     fmt.SetFormatFlags(StringFormatFlagsNoWrap);
     fmt.SetTrimming(StringTrimmingEllipsisCharacter);
     std::wstring text = status_;
-    text += L"   ·   auto-refresh every " + std::to_wstring(cfg_.refreshSeconds) + L" s";
+    int64_t nextOpen = INT64_MAX;
+    if (MarketsClosed(nextOpen)) {
+        const int64_t now  = UnixNow();
+        const int64_t wait = static_cast<int64_t>(cfg_.closedRefreshSeconds) - (now - lastRefresh_);
+        int64_t next = (wait > 0) ? wait : 0;
+        if (nextOpen != INT64_MAX && nextOpen - now < next) { next = nextOpen - now; }
+        text += L"   ·   markets closed, next check in ";
+        text += (next >= 120) ? std::to_wstring(next / 60) + L" min" : std::to_wstring(next > 0 ? next : 0) + L" s";
+        if (nextOpen != INT64_MAX) { text += L" (opens " + FormatDate(nextOpen, LocalOffsetSec(), DateStyle::DayTime) + L")"; }
+    } else {
+        text += L"   ·   auto-refresh every " + std::to_wstring(cfg_.refreshSeconds) + L" s";
+    }
     g.DrawString(text.c_str(), -1, &font, ToRectF(statusRect_), &fmt, &grey);
 }
 

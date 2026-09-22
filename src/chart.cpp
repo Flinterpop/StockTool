@@ -5,6 +5,7 @@
 
 #include <cassert>
 #include <cmath>
+#include <ctime>
 #include <limits>
 
 namespace st {
@@ -909,6 +910,235 @@ void DrawChartOverlay(Graphics& g, const RectF& rc, const ChartInput& in, float 
 void DrawChart(Graphics& g, const RectF& rc, const ChartInput& in, float scale) {
     DrawChartBase(g, rc, in, scale);
     DrawChartOverlay(g, rc, in, scale);
+}
+
+// ---------------------------------------------------------------------------
+// Portfolio history
+
+namespace {
+
+// How far back each range preset reaches, in days (0 = everything).
+int64_t RangeDays(size_t range) {
+    switch (range) {
+    case 0: case 1: return 7;       // 1D / 5D: a week is the least that makes sense
+    case 2: return 31;
+    case 3: return 183;
+    case 4: return -1;              // YTD
+    case 5: return 366;
+    case 6: return 5 * 366;
+    default: return 0;
+    }
+}
+
+struct PortfolioCtx {
+    Layout        L;
+    CompareRange  cr;      // time window of the points in view
+    PriceScale    sc;      // value scale
+    size_t        first = 0;   // first history index in view
+    size_t        count = 0;   // points in view
+    double        benchBase = 0.0;   // benchmark close at the first point in view
+    bool          ok = false;
+};
+
+PortfolioCtx PortfolioContext(const RectF& rc, const PortfolioInput& in, float s) {
+    PortfolioCtx c;
+    c.L = MakeLayout(rc, s, false, false);
+    const History* h = in.history;
+    if (h == nullptr || h->count < 2) { return c; }
+    const int64_t days = RangeDays(in.range);
+    const int64_t newest = h->pts[h->count - 1].day;
+    int64_t from = 0;
+    if (days > 0) {
+        from = newest - days * 86400;
+    } else if (days < 0) {
+        tm p{};
+        const __time64_t t = static_cast<__time64_t>(newest);
+        if (_gmtime64_s(&p, &t) == 0) {
+            p.tm_mon = 0;
+            p.tm_mday = 1;
+            from = static_cast<int64_t>(_mkgmtime64(&p));
+        }
+    }
+    size_t first = 0;
+    for (size_t i = 0; i < h->count; ++i) {
+        if (h->pts[i].day >= from) { first = i; break; }
+    }
+    if (h->count - first < 2 && first > 0) { first = h->count - 2; }   // always show a line
+    c.first = first;
+    c.count = h->count - first;
+    c.cr.t0 = h->pts[first].day;
+    c.cr.t1 = newest;
+    c.cr.ok = c.cr.t1 > c.cr.t0;
+    if (!c.cr.ok) { return c; }
+    PriceScale sc{ h->pts[first].value, h->pts[first].value };
+    for (size_t i = first; i < h->count; ++i) {
+        Expand(sc, h->pts[i].value);
+        if (h->pts[i].cost > 0.0) { Expand(sc, h->pts[i].cost); }
+    }
+    if (in.bench != nullptr && in.bench->valid && in.bench->series.count > 1) {
+        const Series& b = in.bench->series;
+        const size_t i0 = IndexAtOrBefore(b, c.cr.t0 + 86400 - 1);
+        c.benchBase = b.pts[i0].close;
+        if (c.benchBase > 0.0) {
+            for (size_t i = i0; i < b.count; ++i) {
+                if (b.pts[i].time > c.cr.t1 + 86400) { break; }
+                Expand(sc, h->pts[first].value * b.pts[i].close / c.benchBase);
+            }
+        }
+    }
+    double pad = (sc.hi - sc.lo) * 0.08;
+    if (pad <= 0.0) { pad = max(1.0, sc.hi * 0.01); }
+    sc.lo -= pad;
+    sc.hi += pad;
+    c.sc = sc;
+    c.ok = true;
+    return c;
+}
+
+size_t PointAtX(const History& h, const PortfolioCtx& c, float x) {
+    size_t best = c.first;
+    float bestD = std::numeric_limits<float>::max();
+    for (size_t i = c.first; i < h.count; ++i) {
+        const float d = std::fabs(XForTime(h.pts[i].day, c.L.price, c.cr) - x);
+        if (d < bestD) { bestD = d; best = i; }
+    }
+    return best;
+}
+
+} // namespace
+
+void DrawPortfolioChart(Graphics& g, const RectF& rc, const PortfolioInput& in, float scale) {
+    assert(scale > 0.0f);
+    assert(in.theme != nullptr);
+    if (rc.Width < 40.0f || rc.Height < 40.0f) { return; }
+    const Theme& th = *in.theme;
+    const Font axisFont = MakeFont(8.5f, scale);
+    const Font body     = MakeFont(11.0f, scale);
+    const PortfolioCtx c = PortfolioContext(rc, in, scale);
+    if (!c.ok) {
+        const size_t n = (in.history != nullptr) ? in.history->count : 0;
+        DrawMessage(g, rc, n == 0 ? L"No portfolio history yet. The value is recorded once a day while StockTool runs with holdings."
+                                  : L"One day recorded so far. Come back tomorrow for a line.", body, th);
+        return;
+    }
+    const History& h = *in.history;
+    const Layout& L = c.L;
+    DrawPriceGrid(g, L, c.sc, axisFont, th, scale, false);
+
+    // Date ticks along the window.
+    {
+        const float  labelW = 76.0f * scale;
+        const size_t nTicks = static_cast<size_t>(max(1.0f, L.axisB.Width / labelW));
+        const int64_t span  = c.cr.t1 - c.cr.t0;
+        const DateStyle style = (span > 540 * 86400) ? DateStyle::MonthYear : DateStyle::DayMonth;
+        Pen grid(th.grid, 1.0f);
+        SolidBrush txt(th.textMuted);
+        StringFormat fmt;
+        fmt.SetAlignment(StringAlignmentCenter);
+        fmt.SetFormatFlags(StringFormatFlagsNoWrap);
+        for (size_t k = 0; k <= nTicks && k < 64; ++k) {
+            const int64_t t = c.cr.t0 + span * static_cast<int64_t>(k) / static_cast<int64_t>(max<size_t>(nTicks, 1));
+            const float x = XForTime(t, L.price, c.cr);
+            g.DrawLine(&grid, x, L.price.Y, x, L.price.Y + L.price.Height);
+            const std::wstring label = FormatDate(t, 0, style);
+            g.DrawString(label.c_str(), -1, &axisFont, RectF(x - labelW / 2, L.axisB.Y + 3.0f * scale, labelW, L.axisB.Height), &fmt, &txt);
+        }
+    }
+
+    g.SetClip(RectF(L.price.X, L.price.Y - 2.0f, L.price.Width, L.price.Height + 4.0f));
+    // Benchmark, rebased to the first value in view.
+    if (in.bench != nullptr && in.bench->valid && c.benchBase > 0.0) {
+        const Series& b = in.bench->series;
+        Pen pen(th.textMuted, 1.2f * scale);
+        pen.SetDashStyle(DashStyleDash);
+        PointF prev;
+        bool havePrev = false;
+        const double base = h.pts[c.first].value;
+        for (size_t i = 0; i < b.count; ++i) {
+            if (b.pts[i].time < c.cr.t0 || b.pts[i].time > c.cr.t1 + 86400) { continue; }
+            const PointF p(XForTime(min(b.pts[i].time, c.cr.t1), L.price, c.cr), YFor(base * b.pts[i].close / c.benchBase, L.price, c.sc));
+            if (havePrev) { g.DrawLine(&pen, prev, p); }
+            prev = p;
+            havePrev = true;
+        }
+    }
+    // Cost base (dashed) and value (solid, filled).
+    {
+        Pen costPen(th.sma50, 1.2f * scale);
+        costPen.SetDashStyle(DashStyleDot);
+        Pen valuePen(th.line, 2.0f * scale);
+        std::array<PointF, kMaxHistoryPoints> pts{};
+        size_t n = 0;
+        PointF prevCost;
+        bool haveCost = false;
+        for (size_t i = c.first; i < h.count && n < kMaxHistoryPoints; ++i) {
+            const float x = XForTime(h.pts[i].day, L.price, c.cr);
+            pts[n] = PointF(x, YFor(h.pts[i].value, L.price, c.sc));
+            ++n;
+            if (h.pts[i].cost > 0.0) {
+                const PointF pc(x, YFor(h.pts[i].cost, L.price, c.sc));
+                if (haveCost) { g.DrawLine(&costPen, prevCost, pc); }
+                prevCost = pc;
+                haveCost = true;
+            }
+        }
+        if (n >= 2) {
+            GraphicsPath area;
+            area.AddLines(pts.data(), static_cast<INT>(n));
+            area.AddLine(pts[n - 1], PointF(pts[n - 1].X, L.price.Y + L.price.Height));
+            area.AddLine(PointF(pts[n - 1].X, L.price.Y + L.price.Height), PointF(pts[0].X, L.price.Y + L.price.Height));
+            area.CloseFigure();
+            LinearGradientBrush fill(PointF(0, L.price.Y), PointF(0, L.price.Y + L.price.Height), th.fillTop, th.fillBottom);
+            g.FillPath(&fill, &area);
+            g.DrawLines(&valuePen, pts.data(), static_cast<INT>(n));
+        }
+    }
+    g.ResetClip();
+
+    // Legend.
+    {
+        const HistoryPoint& last  = h.pts[h.count - 1];
+        const HistoryPoint& first = h.pts[c.first];
+        std::wstring legend = L"Portfolio " + FormatMoney(last.value) + L" " + in.currency;
+        if (first.value > 0.0) { legend += L"   " + FormatPct((last.value - first.value) / first.value * 100.0) + L" over " + kRanges[in.range].label; }
+        if (last.cost > 0.0)   { legend += L"   ·  cost " + FormatMoney(last.cost) + L" (dotted)"; }
+        if (in.bench != nullptr && in.bench->valid && c.benchBase > 0.0 && in.benchLabel != nullptr) {
+            const Series& b = in.bench->series;
+            const size_t iEnd = IndexAtOrBefore(b, c.cr.t1 + 86400);
+            legend += L"   ·  " + std::wstring(in.benchLabel) + L" " + FormatPct((b.pts[iEnd].close - c.benchBase) / c.benchBase * 100.0) + L" (dashed)";
+        }
+        SolidBrush txt(th.textMuted);
+        StringFormat fmt;
+        fmt.SetFormatFlags(StringFormatFlagsNoWrap);
+        fmt.SetTrimming(StringTrimmingEllipsisCharacter);
+        g.DrawString(legend.c_str(), -1, &axisFont, RectF(L.price.X + 8.0f * scale, L.price.Y + 6.0f * scale, L.price.Width - 16.0f * scale, 16.0f * scale), &fmt, &txt);
+    }
+
+    // Hover: nearest recorded day.
+    if (in.hoverX >= 0 && static_cast<float>(in.hoverX) >= L.price.X && static_cast<float>(in.hoverX) <= L.price.X + L.price.Width &&
+        static_cast<float>(in.hoverY) >= L.price.Y && static_cast<float>(in.hoverY) <= L.price.Y + L.price.Height) {
+        const size_t i = PointAtX(h, c, static_cast<float>(in.hoverX));
+        const HistoryPoint& p = h.pts[i];
+        const float x = XForTime(p.day, L.price, c.cr);
+        Pen cross(th.hover, 1.0f);
+        cross.SetDashStyle(DashStyleDash);
+        g.DrawLine(&cross, x, L.price.Y, x, L.price.Y + L.price.Height);
+        SolidBrush dot(th.line);
+        const float r = 3.5f * scale;
+        g.FillEllipse(&dot, x - r, YFor(p.value, L.price, c.sc) - r, 2 * r, 2 * r);
+        std::wstring tip = FormatDate(p.day, 0, DateStyle::Full) + L"\nValue " + FormatMoney(p.value) + L" " + in.currency;
+        if (p.cost > 0.0) {
+            tip += L"\nCost " + FormatMoney(p.cost) + L"\nGain " + FormatSignedMoney(p.value - p.cost) + L" (" + FormatPct((p.value - p.cost) / p.cost * 100.0) + L")";
+        }
+        if (in.bench != nullptr && in.bench->valid && c.benchBase > 0.0 && in.benchLabel != nullptr) {
+            const Series& b = in.bench->series;
+            const size_t bi = IndexAtOrBefore(b, p.day + 86400 - 1);
+            const double first = h.pts[c.first].value;
+            tip += L"\n" + std::wstring(in.benchLabel) + L" " + FormatPct((b.pts[bi].close - c.benchBase) / c.benchBase * 100.0) +
+                   L" vs portfolio " + FormatPct(first > 0.0 ? (p.value - first) / first * 100.0 : 0.0);
+        }
+        DrawTooltip(g, L, x, tip, axisFont, th, scale);
+    }
 }
 
 } // namespace st

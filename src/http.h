@@ -1,4 +1,4 @@
-// Minimal blocking HTTPS GET on top of WinHTTP.
+// Minimal blocking HTTPS GET/POST on top of WinHTTP.
 #pragma once
 
 #include <cstddef>
@@ -28,7 +28,14 @@ public:
     // status counts as success here; the caller inspects `out.status`.
     bool Get(const std::wstring& url, char* buf, size_t cap, HttpResult& out, std::wstring& err);
 
+    // POSTs `body` (UTF-8) with the given Content-Type and optional extra
+    // headers ("Name: value\r\n" lines). Same contract as Get otherwise.
+    bool Post(const std::wstring& url, const std::wstring& contentType, const std::wstring& extraHeaders,
+              const std::string& body, char* buf, size_t cap, HttpResult& out, std::wstring& err);
+
 private:
+    bool Request(const wchar_t* method, const std::wstring& url, const std::wstring& extraHeaders,
+                 const std::string& body, char* buf, size_t cap, HttpResult& out, std::wstring& err);
     bool EnsureSession(std::wstring& err);
     void* session_ = nullptr;   // HINTERNET
 };

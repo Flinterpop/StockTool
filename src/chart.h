@@ -3,6 +3,7 @@
 
 #include "common.h"
 #include "gdiplus_inc.h"
+#include "history.h"
 #include "theme.h"
 
 namespace st {
@@ -59,6 +60,22 @@ bool ChartInsetRect(const Gdiplus::RectF& rc, const ChartInput& in, float scale,
 // fractional position that ChartInsetRect maps back to the same place.
 void ChartInsetFractionFor(const Gdiplus::RectF& rc, const ChartInput& in, float scale,
                            float px, float py, float& fx, float& fy);
+
+// Portfolio value over time (View > Portfolio history): value and cost
+// lines from the recorded history, the benchmark rebased to the first
+// value in view, with a hover tooltip. `range` picks how far back.
+struct PortfolioInput {
+    const History*   history    = nullptr;
+    size_t           range      = kRange1Y;   // index into kRanges
+    const QuoteData* bench      = nullptr;    // benchmark at the same range (nullptr = none)
+    const wchar_t*   benchLabel = nullptr;
+    const wchar_t*   currency   = L"";
+    int              hoverX     = -1;
+    int              hoverY     = -1;
+    const Theme*     theme      = nullptr;
+};
+
+void DrawPortfolioChart(Gdiplus::Graphics& g, const Gdiplus::RectF& rc, const PortfolioInput& in, float scale);
 
 // Font helper shared with the panels: `pt` is a point size at 96 dpi.
 Gdiplus::REAL FontPx(float pt, float scale);

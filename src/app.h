@@ -24,7 +24,7 @@ public:
     bool Create(HINSTANCE hInst, int nCmdShow, std::wstring& err);
     int  Run();
 
-    static constexpr size_t kToolCount = 9;   // view toggles on the toolbar
+    static constexpr size_t kToolCount = 10;  // view toggles on the toolbar
 
 private:
     // Derived per-stock figures used by the list, header and portfolio strip.
@@ -42,6 +42,7 @@ private:
     struct Portfolio {
         bool         any     = false;
         bool         partial = false;   // an FX rate is still missing
+        bool         incomplete = false; // a held ticker has no price yet
         double       value   = 0.0;     // in cfg_.portfolioCurrency
         double       cost    = 0.0;
         double       day     = 0.0;
@@ -68,6 +69,13 @@ private:
     LRESULT OnNotify(const NMHDR* hdr);
     void OnContextMenu(HWND source, int x, int y);
     void OnTimer();
+    void Refresh();                     // re-fetch everything now
+    void LoadPortfolioHistory();
+    void MaybeRecordHistory();          // one row per day, once the portfolio total is complete
+    PortfolioInput BuildPortfolioInput();
+    // True when every ticker with a known session is outside it. `nextOpen`
+    // = earliest known upcoming open (INT64_MAX if none is known yet).
+    bool MarketsClosed(int64_t& nextOpen) const;
     void OnMouseMove(int x, int y, bool buttonDown);
     void OnMouseLeave();
     void OnLButtonDown(int x, int y);
@@ -235,6 +243,9 @@ private:
     size_t                                              quoteCount_ = 0;
     std::unique_ptr<std::array<NewsCache, kMaxStocks>>  news_;
     std::unique_ptr<QuoteData>                          bench_;      // benchmark index at range_
+    int64_t lastRefresh_ = 0;                                        // Unix time of the last full refresh
+    std::unique_ptr<History>                            history_;    // portfolio value per day, active list
+    int64_t lastHistoryWrite_ = 0;
     bool                                                benchValid_ = false;
     std::array<FxRate, kMaxFx>                          fx_{};
     std::array<AlertState, kMaxStocks>                  alerts_{};

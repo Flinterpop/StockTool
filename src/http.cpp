@@ -94,6 +94,22 @@ bool HttpClient::EnsureSession(std::wstring& err) {
 
 bool HttpClient::Get(const std::wstring& url, char* buf, size_t cap,
                      HttpResult& out, std::wstring& err) {
+    return Request(L"GET", url, L"", std::string(), buf, cap, out, err);
+}
+
+bool HttpClient::Post(const std::wstring& url, const std::wstring& contentType, const std::wstring& extraHeaders,
+                      const std::string& body, char* buf, size_t cap, HttpResult& out, std::wstring& err) {
+    assert(!contentType.empty());
+    if (body.size() > 65536) {
+        err = L"POST body too large";
+        return false;
+    }
+    return Request(L"POST", url, L"Content-Type: " + contentType + L"\r\n" + extraHeaders, body, buf, cap, out, err);
+}
+
+bool HttpClient::Request(const wchar_t* method, const std::wstring& url, const std::wstring& extraHeaders,
+                         const std::string& body, char* buf, size_t cap, HttpResult& out, std::wstring& err) {
+    assert(method != nullptr);
     assert(buf != nullptr);
     assert(cap > 0);
     out = HttpResult{};
@@ -136,7 +152,7 @@ bool HttpClient::Get(const std::wstring& url, char* buf, size_t cap,
 
     const DWORD flags = (uc.nScheme == INTERNET_SCHEME_HTTPS) ? WINHTTP_FLAG_SECURE : 0;
     Handle req;
-    req.h = WinHttpOpenRequest(conn.h, L"GET", target.c_str(), nullptr, WINHTTP_NO_REFERER,
+    req.h = WinHttpOpenRequest(conn.h, method, target.c_str(), nullptr, WINHTTP_NO_REFERER,
                                WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
     if (req.h == nullptr) {
         err = ErrorText(L"WinHttpOpenRequest", GetLastError());
@@ -150,14 +166,16 @@ bool HttpClient::Get(const std::wstring& url, char* buf, size_t cap,
 
     const std::wstring headers =
         std::wstring(L"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) ") + kAgent +
-        L"\r\nAccept: application/json, text/plain, */*\r\n";
+        L"\r\nAccept: application/json, text/plain, */*\r\n" + extraHeaders;
     if (!WinHttpAddRequestHeaders(req.h, headers.c_str(), static_cast<DWORD>(-1),
                                   WINHTTP_ADDREQ_FLAG_ADD)) {
         err = ErrorText(L"WinHttpAddRequestHeaders", GetLastError());
         return false;
     }
-    if (!WinHttpSendRequest(req.h, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-                            WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
+    // WinHTTP does not copy the body: `body` outlives the call.
+    void* data = body.empty() ? WINHTTP_NO_REQUEST_DATA : const_cast<char*>(body.data());
+    const DWORD bodyLen = static_cast<DWORD>(body.size());
+    if (!WinHttpSendRequest(req.h, WINHTTP_NO_ADDITIONAL_HEADERS, 0, data, bodyLen, bodyLen, 0)) {
         err = ErrorText(L"WinHttpSendRequest", GetLastError());
         return false;
     }

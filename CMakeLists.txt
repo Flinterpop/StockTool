@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 # Single source of truth for the version: it flows into the code
 # (STOCKTOOL_VERSION*) and the exe's VERSIONINFO resource from here.
-project(StockTool VERSION 0.4.0 LANGUAGES CXX RC)
+project(StockTool VERSION 0.5.0 LANGUAGES CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -33,6 +33,7 @@ add_library(stocktool_core STATIC
     src/brokerimport.cpp
     src/chart.cpp
     src/config.cpp
+    src/history.cpp
     src/http.cpp
     src/indicators.cpp
     src/position.cpp
@@ -77,6 +78,7 @@ if(Catch2_FOUND)
         tests/test_brokerimport.cpp
         tests/test_chart_geometry.cpp
         tests/test_config.cpp
+        tests/test_history.cpp
         tests/test_indicators.cpp
         tests/test_position.cpp
         tests/test_quote_parser.cpp

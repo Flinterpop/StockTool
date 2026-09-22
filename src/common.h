@@ -51,12 +51,20 @@ struct QuoteMeta {
     double  wk52Low        = 0.0;
     int64_t marketTime     = 0;    // Unix seconds of last trade
     int32_t gmtOffsetSec   = 0;    // exchange local offset from UTC
+    int64_t regularStart   = 0;    // today's regular session, Unix seconds (0 = unknown)
+    int64_t regularEnd     = 0;
 };
+
+// Regular session open right now? False when the provider gave no session.
+inline bool MarketOpen(const QuoteMeta& m, int64_t now) {
+    return m.regularStart > 0 && m.regularEnd > m.regularStart && now >= m.regularStart && now < m.regularEnd;
+}
 
 struct QuoteData {
     bool         valid = false;
     std::wstring symbol;   // the symbol this was fetched for
-    std::wstring error;
+    std::wstring error;    // why it failed; with `source` set, why the primary provider failed
+    std::wstring source;   // "" = primary provider, else the fallback that supplied the data ("TMX")
     QuoteMeta    meta;
     Series       series;
     size_t       dividendCount = 0;
@@ -146,7 +154,7 @@ struct EndpointHealth {
     uint32_t       failures   = 0;     // consecutive failures
     std::wstring   lastError;
 };
-constexpr size_t kEndpointCount = 6;   // chart, fundamentals, search, fx, news, crumb
+constexpr size_t kEndpointCount = 7;   // chart, fundamentals, search, fx, news, crumb, tmx
 
 struct Alert {
     double above = 0.0;  // 0 = unset

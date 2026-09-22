@@ -16,7 +16,7 @@ namespace st {
 enum class JobKind : uint8_t { Summary, Chart, Inset, Quote, Search, Fx, News, Bench };
 
 // Endpoint slots for the health panel.
-enum class Endpoint : uint8_t { Chart, Quote, Search, Fx, News, Crumb };
+enum class Endpoint : uint8_t { Chart, Quote, Search, Fx, News, Crumb, Tmx };
 
 struct FetchJob {
     JobKind      kind   = JobKind::Summary;
@@ -25,6 +25,8 @@ struct FetchJob {
     std::wstring symbol;       // captured at enqueue time; the worker never reads Config
     std::wstring url;          // likewise, built from the template at enqueue time
     std::wstring aux;          // Fx: "FROM|TO"
+    std::wstring fallback;     // chart jobs: TMX endpoint to try when the primary fails ("" = none)
+    const RangeSpec* spec = nullptr;   // chart jobs: what was asked for (drives the fallback request)
     HWND         notify = nullptr;  // Search only: window that receives the result
 };
 
@@ -111,7 +113,9 @@ private:
     bool Get(Endpoint ep, const std::wstring& url, HttpResult& res, std::wstring& err);   // http_.Get + health/backoff
     bool InBackoff(std::wstring& why);
     void Record(Endpoint ep, bool ok, const HttpResult& res, const std::wstring& err);
-    bool Fetch(const std::wstring& url, QuoteData& out);
+    bool Fetch(const FetchJob& job, QuoteData& out);
+    bool FetchTmx(const FetchJob& job, QuoteData& out, std::wstring& err);
+    bool FetchBocRate(const std::wstring& from, const std::wstring& to, double& rate, std::wstring& err);
     bool EnsureCrumb(std::wstring& err);
     std::wstring BuildUrl(const std::wstring& symbol, const RangeSpec& spec) const;
 

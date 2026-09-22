@@ -75,6 +75,32 @@ void ParseMeta(const json& m, QuoteMeta& out) {
     out.wk52Low        = NumOr(m, "fiftyTwoWeekLow", 0.0);
     out.marketTime     = static_cast<int64_t>(NumOr(m, "regularMarketTime", 0.0));
     out.gmtOffsetSec   = static_cast<int32_t>(NumOr(m, "gmtoffset", 0.0));
+    const json* period  = Child(m, "currentTradingPeriod");
+    const json* regular = (period != nullptr) ? Child(*period, "regular") : nullptr;
+    if (regular != nullptr) {
+        out.regularStart = static_cast<int64_t>(NumOr(*regular, "start", 0.0));
+        out.regularEnd   = static_cast<int64_t>(NumOr(*regular, "end", 0.0));
+    }
+}
+
+// "2026-09-21T16:00:00-04:00" -> Unix seconds, and the offset in seconds.
+bool ParseIsoDateTime(const std::string& text, int64_t& unixTime, int32_t& offsetSec) {
+    int y = 0, mo = 0, d = 0, h = 0, mi = 0, s = 0, oh = 0, om = 0;
+    char sign = '+';
+    const int n = sscanf_s(text.c_str(), "%d-%d-%dT%d:%d:%d%c%d:%d", &y, &mo, &d, &h, &mi, &s, &sign, 1u, &oh, &om);
+    if (n < 6 || y < 1970 || y > 2200 || mo < 1 || mo > 12 || d < 1 || d > 31) { return false; }
+    tm p{};
+    p.tm_year = y - 1900;
+    p.tm_mon  = mo - 1;
+    p.tm_mday = d;
+    p.tm_hour = h;
+    p.tm_min  = mi;
+    p.tm_sec  = s;
+    const __time64_t local = _mkgmtime64(&p);
+    if (local < 0) { return false; }
+    offsetSec = (n == 9) ? (oh * 3600 + om * 60) * (sign == '-' ? -1 : 1) : 0;
+    unixTime  = static_cast<int64_t>(local) - offsetSec;
+    return true;
 }
 
 bool ParseSeries(const json& r, Series& s, std::wstring& err) {
@@ -171,6 +197,98 @@ bool ParseChartJson(const char* data, size_t len, QuoteData& out, std::wstring& 
     out.valid = true;
     assert(err.empty() || !out.valid);
     return true;
+}
+
+bool ParseTmxJson(const char* data, size_t len, QuoteData& out, std::wstring& err) {
+    assert(data != nullptr);
+    out = QuoteData{};
+    if (len == 0) {
+        err = L"Empty response";
+        return false;
+    }
+    const json doc = json::parse(data, data + len, nullptr, false);
+    if (doc.is_discarded()) {
+        err = L"Response is not valid JSON";
+        return false;
+    }
+    const json* errors = Child(doc, "errors");
+    if (errors != nullptr && errors->is_array() && !errors->empty()) {
+        err = L"TMX: " + StrOr((*errors)[0], "message", L"unknown error");
+        return false;
+    }
+    const json* d    = Child(doc, "data");
+    const json* bars = (d != nullptr) ? Child(*d, "getTimeSeriesData") : nullptr;
+    if (bars == nullptr || !bars->is_array()) {
+        err = L"TMX: response has no time series";
+        return false;
+    }
+    if (bars->empty()) {
+        err = L"TMX: no data for this symbol";
+        return false;
+    }
+    // Newest first in the reply; keep the newest kMaxPoints and store ascending.
+    const size_t take = min(bars->size(), kMaxPoints);
+    size_t n = 0;
+    for (size_t i = 0; i < take; ++i) {
+        const json& b = (*bars)[i];
+        const json* dt = Child(b, "dateTime");
+        Candle c;
+        int32_t offset = 0;
+        if (dt == nullptr || !dt->is_string() || !ParseIsoDateTime(dt->get<std::string>(), c.time, offset)) { continue; }
+        c.open   = NumOr(b, "open", 0.0);
+        c.high   = NumOr(b, "high", 0.0);
+        c.low    = NumOr(b, "low", 0.0);
+        c.close  = NumOr(b, "close", 0.0);
+        c.volume = NumOr(b, "volume", 0.0);
+        if (c.close <= 0.0) { continue; }
+        out.series.pts[take - 1 - i] = c;    // reversed into place
+        if (n == 0) { out.meta.gmtOffsetSec = offset; }
+        ++n;
+    }
+    // Gaps left by skipped bars sit at the front; slide the good ones down.
+    size_t w = 0;
+    for (size_t r = 0; r < take; ++r) {
+        if (out.series.pts[r].close <= 0.0) { continue; }
+        if (w != r) { out.series.pts[w] = out.series.pts[r]; }
+        ++w;
+    }
+    out.series.count = w;
+    if (w == 0) {
+        err = L"TMX: no usable bars";
+        return false;
+    }
+    const Candle& last = out.series.pts[w - 1];
+    out.meta.price      = last.close;
+    out.meta.dayHigh    = last.high;
+    out.meta.dayLow     = last.low;
+    out.meta.dayVolume  = last.volume;
+    out.meta.marketTime = last.time;
+    out.meta.exchange   = L"TMX Money (fallback)";
+    out.source          = L"TMX";
+    out.valid = true;
+    assert(out.series.count <= kMaxPoints);
+    return true;
+}
+
+std::wstring TmxSymbol(const std::wstring& yahooSymbol) {
+    std::wstring s = yahooSymbol;
+    if (s.empty() || s.size() > 24) { return {}; }
+    if (s == L"^GSPTSE") { return L"^TSX"; }
+    if (s == L"^GSPC")   { return L"^SPX"; }
+    if (s[0] == L'^' || s.find(L'=') != std::wstring::npos || s.rfind(L"0P", 0) == 0) { return {}; }
+    static const wchar_t* const kCanadian[] = { L".TO", L".V", L".CN", L".NE" };
+    bool canadian = false;
+    for (const wchar_t* suffix : kCanadian) {
+        const size_t n = wcslen(suffix);
+        if (s.size() > n && s.compare(s.size() - n, n, suffix) == 0) {
+            s.erase(s.size() - n);
+            canadian = true;
+            break;
+        }
+    }
+    if (!canadian && s.find(L'.') != std::wstring::npos) { return {}; }   // some other exchange suffix
+    for (wchar_t& c : s) { if (c == L'-') { c = L'.'; } }               // share classes: RCI-B -> RCI.B
+    return canadian ? s : s + L":US";
 }
 
 namespace {

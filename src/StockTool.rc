@@ -38,6 +38,7 @@ BEGIN
         MENUITEM "Trend &inset",           IDM_INSET
         MENUITEM "&News pane",             IDM_NEWS
         MENUITEM "&Benchmark index",       IDM_BENCHMARK
+        MENUITEM "&Portfolio history",     IDM_PORTFOLIO
         MENUITEM SEPARATOR
         POPUP "&Theme"
         BEGIN

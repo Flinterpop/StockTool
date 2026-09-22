@@ -1,5 +1,5 @@
 ; Inno Setup script for StockTool.
-; Build:  ISCC.exe /DAppVersion=0.4.0 installer\StockTool.iss
+; Build:  ISCC.exe /DAppVersion=0.5.0 installer\StockTool.iss
 ; Output: installer\Output\StockTool-<version>-setup.exe
 ;
 ; Installs to Program Files (per-machine) with Start-menu and optional

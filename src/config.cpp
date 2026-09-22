@@ -27,6 +27,8 @@ constexpr wchar_t kDefaultSearchUrlTemplate[] =
 constexpr wchar_t kDefaultNewsUrlTemplate[] =
     L"https://query2.finance.yahoo.com/v1/finance/search?q={symbol}&quotesCount=0&newsCount=8&listsCount=0";
 
+constexpr wchar_t kDefaultTmxUrl[] = L"https://app-money.tmx.com/graphql";
+
 // Google News, Canadian English edition, searched by company name.
 constexpr wchar_t kDefaultNewsRssTemplate[] =
     L"https://news.google.com/rss/search?q={query}&hl=en-CA&gl=CA&ceid=CA:en";
@@ -37,7 +39,9 @@ constexpr char kDefaultConfigText[] =
     "; NYSE/Nasdaq = bare symbol (e.g. AAPL). Keep this file ASCII.\r\n"
     "\r\n"
     "[settings]\r\n"
+    "; How often (seconds) prices are re-fetched (10..3600), and while every exchange in the list is closed (60..3600).\r\n"
     "refresh_seconds=60\r\n"
+    "closed_refresh_seconds=900\r\n"
     "default_range=1Y\r\n"
     "; Trend inset in the chart corner: 5Y or 1Y\r\n"
     "inset_range=5Y\r\n"
@@ -59,6 +63,9 @@ constexpr char kDefaultConfigText[] =
     "news_source=google\r\n"
     "news_url_template=https://query2.finance.yahoo.com/v1/finance/search?q={symbol}&quotesCount=0&newsCount=8&listsCount=0\r\n"
     "news_rss_template=https://news.google.com/rss/search?q={query}&hl=en-CA&gl=CA&ceid=CA:en\r\n"
+    "; Second chart source when Yahoo fails (daily bars): tmx (TMX Money) or none.\r\n"
+    "fallback_provider=tmx\r\n"
+    "tmx_url=https://app-money.tmx.com/graphql\r\n"
     "\r\n"
     "; Default watch list. Extra lists live in [stocks.<name>] sections.\r\n"
     "[stocks]\r\n"
@@ -304,6 +311,9 @@ bool LoadConfig(const std::wstring& path, const std::wstring& listName, Config& 
 
     const UINT refresh = GetPrivateProfileIntW(kSettings, L"refresh_seconds", 60, path.c_str());
     out.refreshSeconds = (refresh < 10u) ? 10u : (refresh > 3600u ? 3600u : refresh);
+    const UINT closed = GetPrivateProfileIntW(kSettings, L"closed_refresh_seconds", 900, path.c_str());
+    out.closedRefreshSeconds = (closed < 60u) ? 60u : (closed > 3600u ? 3600u : closed);
+    if (out.closedRefreshSeconds < out.refreshSeconds) { out.closedRefreshSeconds = out.refreshSeconds; }
     out.defaultRange   = RangeIndexFromLabel(ReadString(path, kSettings, L"default_range", L"1Y"), kRange1Y);
     out.insetRange     = RangeIndexFromLabel(ReadString(path, kSettings, L"inset_range", L"5Y"), kRange5Y);
     if (out.insetRange != kRange1Y && out.insetRange != kRange5Y) { out.insetRange = kRange5Y; }
@@ -358,6 +368,11 @@ bool LoadConfig(const std::wstring& path, const std::wstring& listName, Config& 
         out.newsSource = NewsSource::None;   // the chosen source has no template
     }
 
+    const std::wstring fallback = ReadString(path, kSettings, L"fallback_provider", L"tmx");
+    out.fallback = (_wcsicmp(fallback.c_str(), L"none") == 0) ? FallbackProvider::None : FallbackProvider::Tmx;
+    out.tmxUrl = ReadString(path, kSettings, L"tmx_url", kDefaultTmxUrl);
+    if (out.tmxUrl.empty()) { out.fallback = FallbackProvider::None; }
+
     ReadListNames(path, out);
     out.listName = ListExists(out, listName) ? listName : L"";
     if (!ReadStockSection(path, ListSection(out.listName), out, err)) { return false; }
@@ -394,6 +409,7 @@ void LoadViewState(const std::wstring& path, ViewState& out) {
     out.inset     = ReadBool(path, kState, L"inset", true);
     out.news      = ReadBool(path, kState, L"news", false);
     out.benchmark = ReadBool(path, kState, L"benchmark", false);
+    out.portfolio = ReadBool(path, kState, L"portfolio", false);
     double ix = 0.0;
     double iy = 0.0;
     ParsePair(ReadString(path, kState, L"inset_pos", L""), ix, iy);
@@ -422,6 +438,7 @@ bool SaveViewState(const std::wstring& path, const ViewState& s, std::wstring& e
         { L"inset",     s.inset ? L"1" : L"0" },
         { L"news",      s.news ? L"1" : L"0" },
         { L"benchmark", s.benchmark ? L"1" : L"0" },
+        { L"portfolio", s.portfolio ? L"1" : L"0" },
         { L"inset_pos", FormatPair(s.insetX, s.insetY) },
         { L"selected",  s.selected },
         { L"list",      s.list },
