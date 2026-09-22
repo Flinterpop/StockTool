@@ -16,7 +16,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE /*hPrev*/, PWSTR /*cmdLine*/, int
 
     INITCOMMONCONTROLSEX icc{};
     icc.dwSize = sizeof(icc);
-    icc.dwICC  = ICC_STANDARD_CLASSES;
+    icc.dwICC  = ICC_STANDARD_CLASSES | ICC_BAR_CLASSES | ICC_TAB_CLASSES;   // tooltips are a bar class
     const BOOL iccOk = InitCommonControlsEx(&icc);
     (void)iccOk;
 

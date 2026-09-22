@@ -41,19 +41,46 @@ constexpr int IDC_RELOAD     = 304;
 
 // Toolbar: one toggle per View-menu command that changes the plot. The
 // buttons use the menu command IDs, so one handler serves both.
-struct ToolSpec { int id; const wchar_t* label; int widthDip; };
+struct ToolSpec { int id; const wchar_t* label; int widthDip; const wchar_t* tip; };
 constexpr std::array<ToolSpec, 10> kTools = {{
-    { IDM_CANDLES,   L"Candles",   70 },
-    { IDM_COMPARE,   L"Compare",   72 },
-    { IDM_SMA20,     L"SMA 20",    62 },
-    { IDM_SMA50,     L"SMA 50",    62 },
-    { IDM_BOLLINGER, L"Bollinger", 76 },
-    { IDM_RSI,       L"RSI",       50 },
-    { IDM_INSET,     L"Inset",     58 },
-    { IDM_NEWS,      L"News",      58 },
-    { IDM_BENCHMARK, L"Bench",     58 },
-    { IDM_PORTFOLIO, L"History",   62 },
+    { IDM_CANDLES,   L"Candles",   70, L"Candlesticks instead of a line\r\n"
+                                       L"Each candle is one bar's open, high, low and close." },
+    { IDM_COMPARE,   L"Compare",   72, L"Compare every ticker in this list\r\n"
+                                       L"Each one as percentage change over the selected range." },
+    { IDM_SMA20,     L"SMA 20",    62, L"20-bar simple moving average\r\n"
+                                       L"About a trading month: smooths out day-to-day noise." },
+    { IDM_SMA50,     L"SMA 50",    62, L"50-bar simple moving average\r\n"
+                                       L"About a quarter. The 20 crossing above it is the 'golden cross'." },
+    { IDM_BOLLINGER, L"Bollinger", 76, L"Bollinger bands (20 bars, 2 standard deviations)\r\n"
+                                       L"A volatility envelope: wide when the stock is volatile, tight when it is quiet." },
+    { IDM_RSI,       L"RSI",       50, L"Relative strength index (14), in its own pane\r\n"
+                                       L"Momentum from 0 to 100: above 70 is overbought, below 30 oversold." },
+    { IDM_INSET,     L"Inset",     58, L"Trend inset\r\n"
+                                       L"A small long-range chart in the corner. Drag it anywhere inside the plot." },
+    { IDM_NEWS,      L"News",      58, L"Headlines pane\r\n"
+                                       L"Latest news for the selected ticker. Click a headline to open it in your browser." },
+    { IDM_BENCHMARK, L"Bench",     58, nullptr },   // names the configured index, so built at display time
+    { IDM_PORTFOLIO, L"History",   62, L"Portfolio history\r\n"
+                                       L"This list's value over time, with its cost base and the benchmark.\r\n"
+                                       L"Recorded once a day while StockTool is running." },
 }};
+
+// One line per range button, in kRanges order.
+constexpr std::array<const wchar_t*, 8> kRangeTips = {{
+    L"Today, in 5-minute bars (Ctrl+1)",
+    L"The last five days, in 15-minute bars (Ctrl+2)",
+    L"The last month, daily bars (Ctrl+3)",
+    L"The last six months, daily bars (Ctrl+4)",
+    L"Since the start of the year, daily bars (Ctrl+5)",
+    L"The last year, daily bars (Ctrl+6)",
+    L"The last five years, weekly bars (Ctrl+7)",
+    L"Everything the provider has, monthly bars (Ctrl+8)",
+}};
+static_assert(kRangeTips.size() == kRanges.size(), "one tip per range button");
+
+// Tips over painted regions rather than controls.
+constexpr UINT_PTR kTipPortfolio = 1;
+constexpr UINT_PTR kTipHeader    = 2;
 static_assert(kTools.size() == App::kToolCount, "toolbar table and button array differ");
 
 constexpr UINT     WM_APP_TRAY   = WM_APP + 10;
@@ -504,6 +531,80 @@ void App::CreateControls() {
     hRemoveBtn_  = button(L"Remove", BS_PUSHBUTTON, IDC_REMOVE);
     hReloadBtn_  = button(L"Reload cfg", BS_PUSHBUTTON, IDC_RELOAD);
     CreateFonts();  // apply font + item height to the controls just made
+    CreateToolTips();
+}
+
+void App::CreateToolTips() {
+    assert(hwnd_ != nullptr);
+    hTips_ = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP,
+                             CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+                             hwnd_, nullptr, hInst_, nullptr);
+    if (hTips_ == nullptr) { return; }   // tips are a nicety: carry on without them
+    SendMessageW(hTips_, TTM_SETMAXTIPWIDTH, 0, Px(420));      // enables the line breaks below
+    SendMessageW(hTips_, TTM_SETDELAYTIME, TTDT_INITIAL, 500);
+    SendMessageW(hTips_, TTM_SETDELAYTIME, TTDT_AUTOPOP, 20000);
+
+    for (size_t i = 0; i < kRanges.size(); ++i) { AddTip(hRangeBtns_[i], kRangeTips[i]); }
+    for (size_t i = 0; i < kTools.size(); ++i) {
+        // A null tip means the text depends on the config; those use a callback.
+        if (kTools[i].tip != nullptr) { AddTip(hToolBtns_[i], kTools[i].tip); }
+        else                          { AddTip(hToolBtns_[i], LPSTR_TEXTCALLBACKW); }
+    }
+    AddTip(hRefreshBtn_, L"Re-fetch every ticker now (F5)\r\n"
+                         L"Prices also refresh on a timer; the status line says when.");
+    AddTip(hAddBtn_,     L"Add a ticker to this list (Ctrl+N)\r\n"
+                         L"Search by company name or type a symbol. The dialog stays open for several.");
+    AddTip(hRemoveBtn_,  L"Remove the selected ticker from this list\r\n"
+                         L"Its holding and transactions are kept if it is still in another list.");
+    AddTip(hReloadBtn_,  L"Re-read stocktool.cfg\r\n"
+                         L"Picks up changes made by hand without restarting.");
+    AddTip(hTabs_,       L"Watch lists\r\n"
+                         L"Click a tab to switch. The List menu creates, renames and deletes lists.");
+    AddTip(hList_,       L"Watch list\r\n"
+                         L"Click to select a ticker, double-click (or F2) to edit it, "
+                         L"right-click for the Ticker menu.");
+    AddAreaTip(kTipPortfolio, portfolioRect_);
+    AddAreaTip(kTipHeader, headerRect_);
+}
+
+void App::AddTip(HWND ctrl, const wchar_t* text) {
+    assert(hTips_ != nullptr && ctrl != nullptr && text != nullptr);
+    TTTOOLINFOW ti{};
+    ti.cbSize   = sizeof(ti);
+    ti.uFlags   = TTF_IDISHWND | TTF_SUBCLASS;   // the tooltip relays the control's own mouse messages
+    ti.hwnd     = hwnd_;
+    ti.uId      = reinterpret_cast<UINT_PTR>(ctrl);
+    ti.lpszText = const_cast<wchar_t*>(text);    // a literal, or LPSTR_TEXTCALLBACKW
+    const LRESULT added = SendMessageW(hTips_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&ti));
+    assert(added != FALSE);
+    (void)added;
+}
+
+void App::AddAreaTip(UINT_PTR id, const RECT& rc) {
+    assert(hTips_ != nullptr && id != 0);
+    TTTOOLINFOW ti{};
+    ti.cbSize   = sizeof(ti);
+    ti.uFlags   = TTF_SUBCLASS;
+    ti.hwnd     = hwnd_;
+    ti.uId      = id;
+    ti.rect     = rc;
+    ti.lpszText = LPSTR_TEXTCALLBACKW;           // the figures change, so build the text on demand
+    const LRESULT added = SendMessageW(hTips_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&ti));
+    assert(added != FALSE);
+    (void)added;
+}
+
+void App::UpdateAreaTips() {
+    if (hTips_ == nullptr) { return; }
+    const std::pair<UINT_PTR, RECT> areas[] = { { kTipPortfolio, portfolioRect_ }, { kTipHeader, headerRect_ } };
+    for (const auto& area : areas) {
+        TTTOOLINFOW ti{};
+        ti.cbSize = sizeof(ti);
+        ti.hwnd   = hwnd_;
+        ti.uId    = area.first;
+        ti.rect   = area.second;   // an empty rect (hidden strip) simply never hits
+        SendMessageW(hTips_, TTM_NEWTOOLRECT, 0, reinterpret_cast<LPARAM>(&ti));
+    }
 }
 
 void App::RebuildList() {
@@ -560,6 +661,10 @@ void App::RebuildListMenu() {
 void App::Layout() {
     RECT rc{};
     GetClientRect(hwnd_, &rc);
+    struct TipSync {   // whatever this function returns through, the tip regions follow
+        App* app;
+        ~TipSync() { app->UpdateAreaTips(); }
+    } tipSync{ this };
     const int w = rc.right;
     const int h = rc.bottom;
     const int m = Px(kMargin);
@@ -1529,6 +1634,12 @@ void App::OnSize(WPARAM wp) {
 
 LRESULT App::OnNotify(const NMHDR* hdr) {
     assert(hdr != nullptr);
+    if (hdr->code == TTN_GETDISPINFOW) {
+        auto* info = reinterpret_cast<NMTTDISPINFOW*>(const_cast<NMHDR*>(hdr));
+        tipText_ = AreaTipText(hdr->idFrom);
+        info->lpszText = tipText_.empty() ? nullptr : tipText_.data();
+        return 0;
+    }
     if (hdr->hwndFrom == hTabs_ && hdr->code == TCN_SELCHANGE) {
         const int sel = TabCtrl_GetCurSel(hTabs_);
         if (sel >= 0 && static_cast<size_t>(sel) < cfg_.listCount) { SwitchList(cfg_.lists[static_cast<size_t>(sel)]); }
@@ -1938,6 +2049,85 @@ void App::OnEditTransactions() {
     Layout();
     RedrawAll();
     SetStatus(std::to_wstring(count) + L" transaction(s) saved for " + e.symbol);
+}
+
+// Text for a callback tip: the painted regions (whose figures change and
+// whose lines are elided when the panel is narrow) and the Bench button
+// (which names the configured index).
+std::wstring App::AreaTipText(UINT_PTR id) const {
+    // The toolbar entries with no fixed tip text are answered here.
+    for (size_t i = 0; i < kTools.size(); ++i) {
+        if (kTools[i].tip != nullptr || id != reinterpret_cast<UINT_PTR>(hToolBtns_[i])) { continue; }
+        assert(kTools[i].id == IDM_BENCHMARK);
+        const std::wstring head = L"Benchmark index\r\n";
+        if (cfg_.benchmark.empty()) { return head + L"No index is configured (benchmark= in stocktool.cfg)."; }
+        return head + cfg_.benchmark + L", rebased to the start of the range and drawn as a dashed line.\r\n"
+                      L"The price above that line means it is beating the market over this window.";
+    }
+    if (id == kTipHeader) {
+        if (!HasStocks()) { return L"This list is empty. Use Add… (Ctrl+N) to put tickers in it."; }
+        const StockEntry& e = cfg_.stocks[selected_];
+        const QuoteData&  q = (*summaries_)[selected_];
+        const PriceChange pc = ComputeChange(q);
+        std::wstring s = e.symbol + (e.name.empty() ? L"" : L" \x2013 " + e.name);
+        if (!q.valid) { return s + L"\r\n" + (q.error.empty() ? L"Loading…" : q.error); }
+        if (pc.valid) {
+            s += L"\r\nLast " + FormatPrice(pc.last) + L" " + CurrencyOf(selected_) + L"   " + FormatChange(pc.change, pc.pct);
+        }
+        if (q.meta.marketTime > 0) {
+            s += L"\r\nAs of " + FormatDate(q.meta.marketTime, q.meta.gmtOffsetSec, DateStyle::FullTime);
+            if (q.meta.regularStart > 0) { s += MarketOpen(q.meta, UnixNow()) ? L" (market open)" : L" (market closed)"; }
+        }
+        if (!q.source.empty()) { s += L"\r\nDaily data via " + q.source + L"; the usual provider failed."; }
+        const Position pos = PositionOf(selected_);
+        if (pos.qty > 0.0 || pos.realised != 0.0) {
+            const bool hasTx = e.txCount > 0;
+            s += L"\r\n\r\nHolding " + FormatMoney(pos.qty) + L" sh";
+            if (pos.acb > 0.0) { s += (hasTx ? L" at an average cost (ACB) of " : L" at ") + FormatPrice(pos.acb); }
+            if (pc.valid && pos.qty > 0.0) {
+                const double value = pos.qty * pc.last;
+                s += L"\r\nValue " + FormatMoney(value) + L"   Day " + FormatSignedMoney(pos.qty * pc.change);
+                if (pos.cost > 0.0) {
+                    s += L"\r\n" + std::wstring(hasTx ? L"Unrealised " : L"Gain ") + FormatSignedMoney(value - pos.cost) +
+                         L" (" + FormatPct((value - pos.cost) / pos.cost * 100.0) + L") on a cost of " + FormatMoney(pos.cost);
+                }
+            }
+            if (pos.realised != 0.0) { s += L"\r\nRealised on sales " + FormatSignedMoney(pos.realised); }
+            const double rec = DividendsReceivedFor(selected_);
+            if (!std::isnan(rec) && rec > 0.0) { s += L"\r\nDividends received " + FormatMoney(rec); }
+            const double div = TrailingDividends(selected_);
+            if (!std::isnan(div) && div > 0.0 && pos.qty > 0.0) {
+                s += L"\r\nDividend income about " + FormatMoney(pos.qty * div) + L" a year at the current rate";
+            }
+        } else {
+            s += L"\r\n\r\nNo position recorded. Ticker > Transactions… or Holding… adds one.";
+        }
+        return s;
+    }
+    if (id == kTipPortfolio) {
+        const Portfolio p = ComputePortfolio();
+        if (!p.any) { return {}; }
+        const std::wstring& cur = cfg_.portfolioCurrency;
+        std::wstring s = L"Everything held in " + (cfg_.listName.empty() ? std::wstring(L"this watch list") : cfg_.listName) +
+                         L", converted to " + cur + L"\r\n";
+        s += L"\r\nValue " + FormatMoney(p.value) + L" " + cur;
+        if (p.partial)    { s += L" so far — an exchange rate has not arrived yet"; }
+        if (p.incomplete) { s += L" so far — a price has not arrived yet"; }
+        if (p.value > 0.0) {
+            s += L"\r\nToday " + FormatSignedMoney(p.day) + L" (" + FormatPct(p.day / (p.value - p.day) * 100.0) + L")";
+        }
+        if (p.cost > 0.0) {
+            const double gain = p.value - p.cost;
+            s += L"\r\nCost " + FormatMoney(p.cost) + L"\r\nUnrealised " + FormatSignedMoney(gain) +
+                 L" (" + FormatPct(gain / p.cost * 100.0) + L")";
+        }
+        if (p.income > 0.0)   { s += L"\r\nDividend income about " + FormatMoney(p.income) + L" " + cur + L" a year"; }
+        if (p.realised != 0.0) { s += L"\r\nRealised on sales " + FormatSignedMoney(p.realised); }
+        if (p.received > 0.0)  { s += L"\r\nDividends received " + FormatMoney(p.received); }
+        s += L"\r\n\r\nView > Portfolio history charts this over time.";
+        return s;
+    }
+    return {};
 }
 
 std::wstring App::HealthText() {

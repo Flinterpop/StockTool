@@ -2,7 +2,7 @@
 
 [![Release][release-badge]][release-latest]
 
-[release-badge]: https://img.shields.io/badge/release-v0.5.1-blue
+[release-badge]: https://img.shields.io/badge/release-v0.6.0-blue
 [release-latest]: https://github.com/Flinterpop/StockTool/releases/latest
 
 *Last updated: 22 Sep 2026*
@@ -77,7 +77,7 @@ cmake --preset default
 cmake --build --preset release      # or: --preset debug
 build\Release\StockTool.exe
 build\Release\stocktool_tests.exe   # Catch2 unit tests
-ISCC.exe /DAppVersion=0.5.1 installer\StockTool.iss   # -> installer\Output\StockTool-0.5.1-setup.exe
+ISCC.exe /DAppVersion=0.6.0 installer\StockTool.iss   # -> installer\Output\StockTool-0.6.0-setup.exe
 ```
 
 The build uses `/W4 /WX /permissive-` and the static CRT (vcpkg `x64-windows-static`), so the exe has no VC++ redistributable dependency. The first build seeds `stocktool.cfg` next to the exe; later builds leave it alone, because the app writes holdings, alerts and window state back into it. The UI-free parts (config, parsers, indicators, formatting, chart geometry, themes) are a static library (`stocktool_core`) shared by the app and the tests.
@@ -124,6 +124,7 @@ Notes:
 - Click a symbol to select it; range buttons (or **Ctrl+1…8**) switch the chart range; **Candles** toggles line/candlestick; **Compare** overlays every ticker as % change over the range; **Refresh (F5)** re-fetches everything now. Prices auto-refresh every `refresh_seconds` while any market in the list is open; once every exchange in the list has closed (the provider reports each ticker's regular session) the app drops to `closed_refresh_seconds` (15 min by default), refreshes again the moment a known session opens, and says so in the header (**Market open / closed**) and the status line (**markets closed, next check in …**). F5 always refreshes.
 - **View** menu: SMA 20, SMA 50, Bollinger bands (20, 2σ), RSI (14) pane, the trend inset, the news pane, the **benchmark index** (the `benchmark` symbol, S&P/TSX Composite by default, rebased to the chart's first close and drawn as a dashed line; hover shows both % changes), theme (system/light/dark) and minimize-to-tray. All toggles are remembered. The **toolbar** across the top of the chart area holds the same plot toggles as buttons (Candles, Compare, SMA 20, SMA 50, Bollinger, RSI, Inset, News, Bench, History); it and the menu stay in sync.
 - **View > Portfolio history** (the **History** button) replaces the price chart with the active list's portfolio value over time: value (solid), cost base (dotted) and the benchmark rebased to the first value in view (dashed), with the range buttons choosing the window and a hover tooltip per day. The value is recorded once a day, in `portfolio-history.csv` next to the config (`date,list,value,cost,currency`, one row per list per day, the last value of the day wins), whenever StockTool is running with holdings and every price and FX rate is in; there is nothing to see until a second day has been recorded.
+- **Tooltips** explain every button (and each range button's interval and shortcut). The ones over the **portfolio strip** and the **header** are built on the spot and list the full figures — value, today, cost, unrealised, realised, dividends received and income — which is where to look when a panel is too narrow to show them all.
 - **Help > User guide (F1)** opens an in-app guide (`src/help.rtf`, embedded as a resource): a quick start, what SMA, Bollinger bands and RSI mean, what the benchmark index is and how to read it, and a step-by-step walkthrough of setting up and using the portfolio.
 - The trend inset can be **dragged** anywhere inside the plot; its position is remembered. Green **D** markers on the chart are ex-dividend dates; hover for the amount.
 - **Add… (Ctrl+N / Ctrl+F)** has a search box: type a company name or partial symbol and pick from the results — the fields fill in; double-click adds straight away. The dialog stays open after each add; **Close** (or Esc) dismisses it. A currency code can be entered to override what the provider reports for that listing.

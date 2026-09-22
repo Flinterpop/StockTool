@@ -131,6 +131,11 @@ private:
     bool InsetHit(int x, int y, Gdiplus::RectF& box);
     int  NewsRowAt(int x, int y) const;       // -1 when not over a headline
     void CreateControls();
+    void CreateToolTips();
+    void AddTip(HWND ctrl, const wchar_t* text);
+    void AddAreaTip(UINT_PTR id, const RECT& rc);      // a tip over a painted region of the window
+    void UpdateAreaTips();                             // after Layout(), so the regions still line up
+    std::wstring AreaTipText(UINT_PTR id) const;       // built fresh each time the tip is shown
     void CreateFonts();
     void Layout();
     void EnsureBackBuffer(HDC hdc, int w, int h);
@@ -202,6 +207,8 @@ private:
     HWND      hAddBtn_     = nullptr;
     HWND      hRemoveBtn_  = nullptr;
     HWND      hReloadBtn_  = nullptr;
+    HWND      hTips_       = nullptr;
+    std::wstring tipText_;                             // kept alive while a callback tip is on screen
     HFONT     hUiFont_     = nullptr;
     HACCEL    hAccel_      = nullptr;
     HBRUSH    hBgBrush_    = nullptr;
