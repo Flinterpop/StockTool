@@ -94,31 +94,37 @@ The version is set once, in `project(StockTool VERSION x.y.z)` in `CMakeLists.tx
 | File | Role |
 |---|---|
 | `src/main.cpp` | Entry point: DPI awareness, GDI+ start/stop, creates `App`. |
-| `src/app.*` | Main window, menus, tabs, controls, layout, tray icon, alerts, portfolio/FX, news pane, CSV export, painting. |
-| `src/dialogs.*` | Add/Edit ticker (with search), Holding, Alerts and list-name dialogs. |
-| `src/help.*`, `src/help.rtf` | The in-app user guide window (RichEdit) and its text. |
-| `src/chart.*` | GDI+ chart renderer: price grid, date axis, line/area or candles, SMA/Bollinger overlays, RSI pane, volume, dividend markers, last-price tag, trend inset, compare overlay, hover tooltip. |
+| `src/app.*` | Main window, menus, tabs, toolbar, controls, layout, tooltips, tray icon, alerts, portfolio/FX, news pane, CSV export/import, market-hours refresh, painting. |
+| `src/dialogs.*` | Add/Edit ticker (with search), Holding, Transactions, Alerts, list-name and import-confirmation dialogs. |
+| `src/help.*`, `src/help.rtf` | The in-app user guide window (RichEdit) and its text, plus the data-source health window. |
+| `src/chart.*` | GDI+ renderer: price grid, date axis, line/area or candles, SMA/Bollinger overlays, RSI pane, volume, dividend markers, last-price tag, trend inset, compare overlay, rebased benchmark line, hover tooltip — and the portfolio-history chart. |
 | `src/indicators.*` | SMA, Bollinger bands, RSI (pure functions, unit-tested). |
+| `src/position.*` | Average-cost (ACB) accounting over transactions: shares, cost base, realised gain, dividends received. |
+| `src/brokerimport.*` | TD WebBroker CSV import: header detection, tolerant number/date parsing, broker-to-Yahoo symbol mapping, and the import plan applied to the config. |
+| `src/history.*` | `portfolio-history.csv` beside the config: one value/cost row per watch list per day. |
 | `src/theme.*` | Light/dark palettes, Windows theme preference, compare-series colours. |
-| `src/fetcher.*` | Worker thread with a bounded job queue (summary, chart, inset, fundamentals, search, FX, news); posts `WM_APP_*` messages to the UI thread; cookie/crumb handshake for fundamentals. |
-| `src/http.*` | Blocking HTTPS GET on WinHTTP with a persistent session (cookies). |
-| `src/quote_parser.*` | Provider JSON to `QuoteData` (meta + OHLCV bars + dividends), `QuoteStats`, `SearchHit`, `NewsItem`; a small RSS reader for Google News. |
-| `src/config.*` | `stocktool.cfg` reading/writing: settings, watch lists, holdings, alerts, currency overrides, view state; config path resolution. |
-| `src/textfmt.*` | Price/money/percent/compact/date formatting. |
-| `src/common.h` | Fixed-capacity data types and the range presets. |
+| `src/fetcher.*` | Worker thread with a bounded job queue (summary, chart, inset, benchmark, fundamentals, search, FX, news); posts `WM_APP_*` messages to the UI thread; cookie/crumb handshake for fundamentals; per-endpoint health, HTTP 429 backoff, and the TMX Money / Bank of Canada fallbacks. |
+| `src/http.*` | Blocking HTTPS GET and POST on WinHTTP with a persistent session (cookies). |
+| `src/quote_parser.*` | Provider JSON to `QuoteData` (meta, trading session, OHLCV bars, dividends), `QuoteStats`, `SearchHit`, `NewsItem`; the TMX Money reply and its symbol mapping; a small RSS reader for Google News. |
+| `src/config.*` | `stocktool.cfg` reading/writing: settings, watch lists, holdings, transactions, alerts, currency overrides, symbol map, cash, view state; config path resolution. |
+| `src/textfmt.*` | Price/money/percent/compact/date formatting, ISO dates. |
+| `src/common.h` | Fixed-capacity data types, the range presets and the market-open test. |
+| `src/gdiplus_inc.h` | The one place GDI+ is included, with `NOMINMAX` and `<objidl.h>` ordered so it compiles under `WIN32_LEAN_AND_MEAN`. |
 | `src/StockTool.rc`, `src/resource.h` | Version resource, app icon (`src/StockTool.ico`), menu and dialog templates. |
 | `installer/StockTool.iss` | Inno Setup script. |
 | `cmake/copy_if_missing.cmake` | Seeds the config next to the exe on the first build only. |
 | `tools/make_icon.py` | Regenerates the multi-size `.ico` with Pillow: `python tools/make_icon.py`. |
-| `tests/*.cpp` | Catch2 tests for the core library. |
+| `tests/*.cpp` | Catch2 tests for the core library: config, broker import, history, position, quote parsers, indicators, chart geometry, formatting. |
 
 Notes:
 
-- Fetch kinds: a **summary** (`5d` daily bars) per symbol feeds the list, tray tooltip, portfolio and stats; a **chart** fetch per symbol/range feeds the plot (all symbols when Compare is on); an **inset** fetch (5Y/1Y, with dividend events) feeds the trend box and the dividend-income estimate; one batch **quote** fetch feeds market cap / P/E / yield; **FX** fetches (`USDCAD=X` etc.) convert holdings into the portfolio currency; **news** fetches feed the headlines pane. Jobs carry their symbol and fully built URL, and results echo the symbol, so the worker never reads configuration and a list change mid-fetch cannot put data in the wrong row.
+- Fetch kinds: a **summary** (`5d` daily bars) per symbol feeds the list, tray tooltip, portfolio and stats; a **chart** fetch per symbol/range feeds the plot (all symbols when Compare is on); an **inset** fetch (5Y/1Y, with dividend events) feeds the trend box and the dividend-income estimate; a **benchmark** fetch supplies the index line; one batch **quote** fetch feeds market cap / P/E / yield; **FX** fetches (`USDCAD=X` etc.) convert holdings into the portfolio currency; **news** fetches feed the headlines pane. Jobs carry their symbol and fully built URL, and results echo the symbol, so the worker never reads configuration and a list change mid-fetch cannot put data in the wrong row.
 - Charts and trend insets are cached per ticker and prefetched in the background after the selected ticker loads, so switching tickers is instant; a selection also queues a silent refresh, which only repaints if the data actually changed. The rendered chart is kept in its own bitmap and only the hover crosshair is redrawn per mouse move.
 - The fundamentals endpoint needs a session cookie and a "crumb"; the worker obtains both on first use and retries once with a fresh crumb on 401/403. If the provider changes this, fundamentals show `-` and the status line says why; the chart still works.
 - Day change is derived from the daily bars: if the newest bar is today's, previous close is the bar before it; otherwise the newest bar is the previous close. Dividend income is the trailing 365 days of ex-dividend amounts times shares held.
 - Alerts fire once when the price crosses the level (tray balloon + status line + amber row), and re-arm when it crosses back.
+- Positions come from `[transactions]` when a symbol has any, otherwise from its `[holdings]` line; the portfolio strip sizes itself to the lines it needs (income, realised, cash) and is re-laid out whenever arriving data changes that count.
+- A failed chart request falls back to TMX Money (daily bars only) and a failed CAD exchange rate to the Bank of Canada; data that came from a fallback is labelled in the header, the status line and the health window.
 - Per-monitor DPI v2 aware; everything is laid out from a DPI scale factor. Dark mode covers the client area, title bar and buttons; the Win32 menu bar and dialogs stay light.
 - Written to the NASA/JPL Power of 10 style: fixed-size arrays (`kMaxStocks`, `kMaxPoints`, `kMaxLists`), bounded loops, asserts on preconditions, no recursion, warnings as errors. The only unbounded loops are the message pump and the worker's service loop, both of which end on shutdown.
 
