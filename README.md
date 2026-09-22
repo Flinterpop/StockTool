@@ -87,7 +87,28 @@ The build uses `/W4 /WX /permissive-` and the static CRT (vcpkg `x64-windows-sta
 
 ## Releasing
 
-The version is set once, in `project(StockTool VERSION x.y.z)` in `CMakeLists.txt`; it flows into the window title, the HTTP `User-Agent`, and the exe's `VERSIONINFO` resource (`src/StockTool.rc`). The only other copies are the badge at the top of this README and the `/DAppVersion=` passed to `ISCC.exe` — bump them in the same commit, tag `vx.y.z`, then attach the portable zip (`StockTool.exe` + `stocktool.cfg` + `README.md`) and the installer to the GitHub release.
+`release.ps1` does the whole thing, and refuses to continue when a check fails:
+
+```powershell
+.\release.ps1                       # verify the current version, build, test, package
+.\release.ps1 -Version x.y.z        # bump the three version-bearing files first
+.\release.ps1 -Version x.y.z -Publish -NotesFile notes.md   # ... then commit, tag, push, create the release
+```
+
+The version is set once, in `project(StockTool VERSION x.y.z)` in `CMakeLists.txt`; it flows into the window title, the HTTP `User-Agent`, and the exe's `VERSIONINFO` resource (`src/StockTool.rc`). The only other copies are the badge at the top of this README and the `/DAppVersion=` passed to `ISCC.exe`, and `-Version` rewrites all three together.
+
+What it checks, each because it once went wrong:
+
+- **Version lockstep** — every `x.y.z` in the three version-bearing files is this release (bar the installer's `0.0.0` fallback), no tracked file names a StockTool build of another version, and the built exe's `VERSIONINFO` matches.
+- **Markdown encoding** — every tracked `.md` is valid UTF-8, has no BOM, and contains no double-encoded text. A PowerShell `Get-Content`/`Set-Content` round-trip once turned this README's em dashes into mojibake and shipped it.
+- **A running instance** — an open `StockTool.exe` makes the linker fail, and the release would otherwise package a stale exe. Pass `-AllowRunning` to reuse the existing build deliberately.
+- **Tests** — `stocktool_tests.exe` must pass; there is no skip switch.
+- **No VC runtime dependency** — `dumpbin /dependents` must show no `VCRUNTIME`, `MSVCP` or `api-ms-win-crt`.
+- **Artifact contents** — the zip must hold exactly `StockTool.exe`, `stocktool.cfg` and `README.md`; the packaged README is re-checked for mojibake; and the shipped `stocktool.cfg` must have no entries under `[holdings]`, `[transactions]`, `[alerts]` or `[cash]`, so no positions or balances can leave with a build.
+
+(The examples use `x.y.z` deliberately: a real version number in this file would be flagged by the lockstep check above.)
+
+Artifacts land in `dist\` (zip) and `installer\Output\` (installer), both ignored by git. Publishing is a separate, explicit step: without `-Publish` the script builds and verifies but touches neither git nor GitHub.
 
 ## Layout of the code
 

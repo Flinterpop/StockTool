@@ -6,6 +6,7 @@
 !/README.md
 !/CMakeLists.txt
 !/CMakePresets.json
+!/release.ps1
 !/stocktool.cfg
 !/src/
 !/src/*.cpp
@@ -29,3 +30,4 @@ out/
 *.user
 __pycache__/
 installer/Output/
+dist/
