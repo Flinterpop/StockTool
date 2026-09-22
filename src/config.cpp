@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <cwchar>
 #include <cwctype>
 
@@ -88,7 +89,10 @@ constexpr char kDefaultConfigText[] =
     "[transactions]\r\n"
     "\r\n"
     "; broker symbol=watch-list symbol   (File > Import from TD...; e.g. TDB902=0P0000A30L)\r\n"
-    "[symbol_map]\r\n";
+    "[symbol_map]\r\n"
+    "\r\n"
+    "; watch list=uninvested cash, added to that list portfolio total\r\n"
+    "[cash]\r\n";
 
 constexpr size_t kSectionBufChars = 8192;
 constexpr wchar_t kSettings[] = L"settings";
@@ -98,6 +102,9 @@ constexpr wchar_t kAlerts[]   = L"alerts";
 constexpr wchar_t kCurrency[] = L"currency";
 constexpr wchar_t kTransactions[] = L"transactions";
 constexpr wchar_t kSymbolMap[] = L"symbol_map";
+constexpr wchar_t kCash[]      = L"cash";
+// [cash] is keyed by watch-list name, and an INI key cannot be empty.
+constexpr wchar_t kDefaultListKey[] = L"(default)";
 constexpr wchar_t kState[]    = L"state";
 constexpr wchar_t kListPrefix[] = L"stocks.";
 
@@ -375,6 +382,7 @@ bool LoadConfig(const std::wstring& path, const std::wstring& listName, Config& 
 
     ReadListNames(path, out);
     out.listName = ListExists(out, listName) ? listName : L"";
+    out.cash = ReadCash(path, out.listName);
     if (!ReadStockSection(path, ListSection(out.listName), out, err)) { return false; }
     if (out.stockCount == 0) {
         if (out.listName.empty()) {
@@ -704,6 +712,23 @@ bool WriteTransactions(const std::wstring& path, const std::wstring& symbol,
         if (!WriteString(path, kTransactions, key.c_str(), value, err)) { return false; }
     }
     return true;
+}
+
+bool WriteCash(const std::wstring& path, const std::wstring& list, double amount, std::wstring& err) {
+    assert(std::isfinite(amount));
+    const std::wstring key = list.empty() ? kDefaultListKey : list;
+    std::array<wchar_t, 32> buf{};
+    swprintf_s(buf.data(), buf.size(), L"%.2f", amount);
+    return WriteString(path, kCash, key.c_str(), (amount == 0.0) ? nullptr : buf.data(), err);
+}
+
+double ReadCash(const std::wstring& path, const std::wstring& list) {
+    const std::wstring key  = list.empty() ? kDefaultListKey : list;
+    const std::wstring text = ReadString(path, kCash, key.c_str(), L"");
+    if (text.empty()) { return 0.0; }
+    wchar_t* end = nullptr;
+    const double v = wcstod(text.c_str(), &end);
+    return std::isfinite(v) ? v : 0.0;
 }
 
 bool WriteCurrency(const std::wstring& path, const std::wstring& symbol, const std::wstring& code, std::wstring& err) {

@@ -30,6 +30,8 @@ struct ImportResult {
     size_t count    = 0;
     size_t skipped  = 0;      // data rows that were not a buy, sell or position
     bool   holdings = false;  // the file was a holdings export (else activity)
+    double cash     = 0.0;    // "Cash,<amount>" from the preamble of a holdings export
+    bool   hasCash  = false;
 };
 
 // Parses the UTF-8 text of an export. False with `err` set when no usable
@@ -83,6 +85,8 @@ struct ImportItem {
 struct ImportPlan {
     std::array<ImportItem, kMaxImportSymbols> items{};
     size_t count    = 0;
+    double cash     = 0.0;    // from the export's preamble; written to the active list
+    bool   hasCash  = false;
     size_t dropped  = 0;          // rows for symbols beyond kMaxImportSymbols
     size_t skipped  = 0;          // from ImportResult
     bool   holdings = false;

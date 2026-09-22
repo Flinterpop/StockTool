@@ -51,6 +51,7 @@ struct Config {
     FallbackProvider fallback = FallbackProvider::Tmx;
     std::wstring tmxUrl;                     // TMX Money GraphQL endpoint
     unsigned     closedRefreshSeconds = 900; // refresh cadence while every market is closed
+    double       cash = 0.0;                 // uninvested cash in the active list, in portfolioCurrency
     std::wstring path;
 };
 
@@ -121,6 +122,11 @@ bool DeleteList(const std::wstring& path, const std::wstring& name, std::wstring
 bool WriteSetting(const std::wstring& path, const wchar_t* key, const std::wstring& value, std::wstring& err);
 
 bool WriteHolding(const std::wstring& path, const std::wstring& symbol, const Holding& h, std::wstring& err);
+
+// [cash] <list>=<amount>: uninvested cash counted in that list's portfolio
+// total. "" is the default list; 0 removes the line.
+bool WriteCash(const std::wstring& path, const std::wstring& list, double amount, std::wstring& err);
+double ReadCash(const std::wstring& path, const std::wstring& list);
 bool WriteAlert(const std::wstring& path, const std::wstring& symbol, const Alert& a, std::wstring& err);
 bool WriteCurrency(const std::wstring& path, const std::wstring& symbol, const std::wstring& code, std::wstring& err);
 

@@ -49,6 +49,7 @@ private:
         double       income  = 0.0;     // trailing-12-month dividends x shares
         double       realised = 0.0;    // from sells recorded as transactions
         double       received = 0.0;    // dividends actually received (transactions x ex-dates)
+        double       cash     = 0.0;    // uninvested cash recorded for this list
     };
     struct NewsCache {
         std::array<NewsItem, kMaxNews> items{};
@@ -107,6 +108,11 @@ private:
     void OnEditAlerts();
     void OnShowHealth();
     void OnReloadConfig();
+    // How many optional lines the portfolio strip needs (income, realised, cash),
+    // so the layout and the painter always agree on its height.
+    static size_t PortfolioExtraLines(const Portfolio& p);
+    int  PortfolioHeightFor(const Portfolio& p) const;   // 0 when the strip is not shown
+    void RelayoutIfPortfolioResized();                   // the line count changes as data arrives
     void OnExportList();
     void OnExportChart();
     void OnImportBroker();

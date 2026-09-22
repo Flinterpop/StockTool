@@ -128,6 +128,77 @@ TEST_CASE("an activity import merges with existing transactions and can add unkn
     CHECK(cfg.stocks[0].txCount == 1);                   // TD.TO's buy, seen from the other list too
 }
 
+TEST_CASE("a real WebBroker holdings export: preamble, cash, fund code, long quantities") {
+    // The shape TD Direct Investing actually produces, values changed.
+    const std::string csv =
+        "As of Date,2026-09-22 14:54:54\r\n"
+        "Account,TD Direct Investing - 20X0X0X\r\n"
+        "Cash,22747.06\r\n"
+        "Investments,16514.49\r\n"
+        "Total Value,39261.55\r\n"
+        "Margin,,\r\n"
+        ",\r\n"
+        "Symbol,Market,Description,Quantity,Average Cost,Price,Book Cost,Market Value,Unrealized $,Unrealized %,"
+        "% of Positions,Loan Value,Change Today $,Change Today %,Bid,Bid Lots,Ask,Ask Lots,Volume,Day Low,Day High,"
+        "52-wk Low,52-wk High\r\n"
+        "BN,CA,\"BROOKFIELD CORP CL-A LVS\",3735.52484000000000,53.5427,53.55,200009.99,200037.36,27.37,0.01,40.71,,"
+        "0.18,0.34,53.5400,18,53.5600,16,1481504,53.1600,54.0600,51.3100,68.4350\r\n"
+        "TDB900,,\"TD CDN INDX -E   /NL'FRAC\",266.79300000000000,35.0415,61.90,9348.82,16514.49,7165.67,76.65,42.06,,,,,,,,,,,,\r\n";
+    ImportResult r;
+    std::wstring err;
+    REQUIRE(ParseBrokerCsv(csv, r, err));
+    CHECK(r.holdings);
+    CHECK(r.hasCash);
+    CHECK(r.cash == Approx(22747.06));          // from the preamble, not a position row
+    REQUIRE(r.count == 2);
+    CHECK(r.rows[0].symbol == L"BN");
+    CHECK(r.rows[0].market == L"CA");
+    CHECK(r.rows[0].tx.qty == Approx(3735.52484));
+    CHECK(r.rows[0].tx.price == Approx(53.5427));   // Average Cost, not the market Price
+    CHECK(r.rows[1].symbol == L"TDB900");
+    CHECK(r.rows[1].market.empty());                 // funds carry no market
+    CHECK(r.rows[1].tx.price == Approx(35.0415));
+}
+
+TEST_CASE("cash from the preamble is written to the active list and read back") {
+    TempIni ini;
+    ini.Write(kCfg);
+    const std::string csv =
+        "Cash,1234.50\n"
+        "Symbol,Market,Quantity,Average Cost\n"
+        "RY,CA,10,100.00\n";
+    ImportResult r;
+    std::wstring err;
+    REQUIRE(ParseBrokerCsv(csv, r, err));
+    ImportPlan plan;
+    BuildImportPlan(r, ini.path, plan);
+    CHECK(plan.hasCash);
+    CHECK(plan.cash == Approx(1234.50));
+    CHECK(DescribeImportPlan(plan).find(L"Uninvested cash 1,234.50") != std::wstring::npos);
+
+    Config cfg;
+    REQUIRE(LoadConfig(ini.path, L"", cfg, err));
+    CHECK(cfg.cash == 0.0);
+    size_t written = 0;
+    REQUIRE(ApplyImportPlan(plan, cfg, false, written, err));
+    REQUIRE(LoadConfig(ini.path, L"", cfg, err));
+    CHECK(cfg.cash == Approx(1234.50));
+
+    // Cash belongs to the list it was imported into, not to every list.
+    Config banks;
+    REQUIRE(LoadConfig(ini.path, L"Banks", banks, err));
+    CHECK(banks.cash == 0.0);
+    REQUIRE(WriteCash(ini.path, L"Banks", 99.0, err));
+    REQUIRE(LoadConfig(ini.path, L"Banks", banks, err));
+    CHECK(banks.cash == Approx(99.0));
+    REQUIRE(LoadConfig(ini.path, L"", cfg, err));
+    CHECK(cfg.cash == Approx(1234.50));
+
+    REQUIRE(WriteCash(ini.path, L"", 0.0, err));     // zero clears the line
+    REQUIRE(LoadConfig(ini.path, L"", cfg, err));
+    CHECK(cfg.cash == 0.0);
+}
+
 TEST_CASE("a holdings import writes [holdings] for known symbols") {
     TempIni ini;
     ini.Write(kCfg);

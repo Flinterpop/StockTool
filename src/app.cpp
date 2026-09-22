@@ -92,7 +92,8 @@ constexpr int kMargin      = 10;
 constexpr int kListW       = 250;
 constexpr int kListItemH   = 44;
 constexpr int kTabsH       = 26;
-constexpr int kPortfolioH  = 78;
+constexpr int kPortfolioBase = 46;   // label, total and the Day/Total line
+constexpr int kPortfolioLine = 16;   // each optional line under it
 constexpr int kToolbarH    = 26;
 constexpr int kHeaderH     = 76;
 constexpr int kButtonH     = 26;
@@ -677,8 +678,9 @@ void App::Layout() {
                    tabsRect_.bottom - tabsRect_.top, TRUE);
         top = tabsRect_.bottom + Px(kListBtnGap);
     }
-    const bool portfolio = ComputePortfolio().any;
-    portfolioRect_ = { m, top, m + Px(kListW), top + (portfolio ? Px(kPortfolioH) : 0) };
+    const Portfolio totals = ComputePortfolio();
+    const bool portfolio = totals.any;
+    portfolioRect_ = { m, top, m + Px(kListW), top + PortfolioHeightFor(totals) };
     if (portfolio) { top = portfolioRect_.bottom + Px(kListBtnGap); }
 
     const int listBtnH = Px(kButtonH);
@@ -1000,8 +1002,32 @@ double App::DividendsReceivedFor(size_t index) const {
     return DividendsReceived(e.tx.data(), e.txCount, q.dividends.data(), q.dividendCount);
 }
 
+int App::PortfolioHeightFor(const Portfolio& p) const {
+    if (!p.any) { return 0; }
+    return Px(kPortfolioBase) + Px(kPortfolioLine) * static_cast<int>(PortfolioExtraLines(p));
+}
+
+// Prices, dividends and FX arrive after the first layout, and each can add
+// or remove a line, so the panel is resized whenever its height no longer
+// matches what the painter is about to draw.
+void App::RelayoutIfPortfolioResized() {
+    const int want = PortfolioHeightFor(ComputePortfolio());
+    if (portfolioRect_.bottom - portfolioRect_.top != want) { Layout(); }
+    InvalidateRect(hwnd_, &portfolioRect_, FALSE);
+}
+
+size_t App::PortfolioExtraLines(const Portfolio& p) {
+    size_t n = 0;
+    if (p.income > 0.0) { ++n; }
+    if (p.realised != 0.0 || p.received > 0.0) { ++n; }
+    if (p.cash != 0.0) { ++n; }
+    return n;
+}
+
 App::Portfolio App::ComputePortfolio() const {
     Portfolio p;
+    p.cash = cfg_.cash;                       // counted in the total, never in the gain
+    p.any  = p.cash != 0.0;
     for (size_t i = 0; i < cfg_.stockCount; ++i) {
         const Position pos = PositionOf(i);
         const bool hasTx = cfg_.stocks[i].txCount > 0;
@@ -1941,8 +1967,7 @@ void App::OnSummaryReady(size_t stock) {
     InvalidateListItem(stock);
     if (PositionOf(stock).qty > 0.0) { EnsureFxRates(); }
     if (ComputePortfolio().any) {
-        if (portfolioRect_.bottom == portfolioRect_.top) { Layout(); }
-        InvalidateRect(hwnd_, &portfolioRect_, FALSE);
+        RelayoutIfPortfolioResized();
         MaybeRecordHistory();
     }
     if (stock == selected_) {
@@ -1981,7 +2006,7 @@ void App::OnInsetReady(size_t stock, size_t range) {
         }
         PrefetchOthers();
     }
-    if (PositionOf(stock).qty > 0.0 || cfg_.stocks[stock].txCount > 0) { InvalidateRect(hwnd_, &portfolioRect_, FALSE); }
+    if (PositionOf(stock).qty > 0.0 || cfg_.stocks[stock].txCount > 0) { RelayoutIfPortfolioResized(); }
 }
 
 void App::OnQuoteReady() {
@@ -1994,8 +2019,7 @@ void App::OnQuoteReady() {
 void App::OnFxReady() {
     if (!fetcher_.CopyFx(fx_)) { return; }
     if (ComputePortfolio().any) {
-        if (portfolioRect_.bottom == portfolioRect_.top) { Layout(); }
-        InvalidateRect(hwnd_, &portfolioRect_, FALSE);
+        RelayoutIfPortfolioResized();
         MaybeRecordHistory();
     }
     InvalidateRect(hwnd_, &headerRect_, FALSE);
@@ -2120,6 +2144,9 @@ std::wstring App::AreaTipText(UINT_PTR id) const {
             const double gain = p.value - p.cost;
             s += L"\r\nCost " + FormatMoney(p.cost) + L"\r\nUnrealised " + FormatSignedMoney(gain) +
                  L" (" + FormatPct(gain / p.cost * 100.0) + L")";
+        }
+        if (p.cash != 0.0) {
+            s += L"\r\nCash " + FormatMoney(p.cash) + L"   (total with cash " + FormatMoney(p.value + p.cash) + L")";
         }
         if (p.income > 0.0)   { s += L"\r\nDividend income about " + FormatMoney(p.income) + L" " + cur + L" a year"; }
         if (p.realised != 0.0) { s += L"\r\nRealised on sales " + FormatSignedMoney(p.realised); }
@@ -2492,15 +2519,23 @@ void App::PaintPortfolio(Graphics& g) {
         rightNoWrap.SetFormatFlags(StringFormatFlagsNoWrap);
         g.DrawString(total.c_str(), -1, &subFont, line2, &rightNoWrap, &gainBrush);
     }
+    // The optional lines pack from the top, so an absent one leaves no gap.
+    float nextY = rc.Y + 40.0f * scale_;
+    const float lineH = static_cast<float>(kPortfolioLine) * scale_;
+    auto drawLine = [&](const std::wstring& text) {
+        if (nextY + lineH > rc.Y + rc.Height + 1.0f) { return; }   // a resize is already on its way
+        g.DrawString(text.c_str(), -1, &subFont, RectF(rc.X + pad, nextY, rc.Width - 2 * pad, 16.0f * scale_), &nowrap, &grey);
+        nextY += lineH;
+    };
     if (p.income > 0.0) {
-        const std::wstring third = L"Dividend income ~" + FormatMoney(p.income) + L" " + cfg_.portfolioCurrency + L"/yr";
-        g.DrawString(third.c_str(), -1, &subFont, RectF(rc.X + pad, rc.Y + 40.0f * scale_, rc.Width - 2 * pad, 16.0f * scale_), &nowrap, &grey);
+        drawLine(L"Dividend income ~" + FormatMoney(p.income) + L" " + cfg_.portfolioCurrency + L"/yr");
     }
-    std::wstring fourth;
-    if (p.realised != 0.0) { fourth += L"Realised " + FormatSignedMoney(p.realised); }
-    if (p.received > 0.0) { fourth += (fourth.empty() ? L"" : L"   ") + std::wstring(L"Dividends received ") + FormatMoney(p.received); }
-    if (!fourth.empty()) {
-        g.DrawString(fourth.c_str(), -1, &subFont, RectF(rc.X + pad, rc.Y + 56.0f * scale_, rc.Width - 2 * pad, 16.0f * scale_), &nowrap, &grey);
+    std::wstring realised;
+    if (p.realised != 0.0) { realised += L"Realised " + FormatSignedMoney(p.realised); }
+    if (p.received > 0.0) { realised += (realised.empty() ? L"" : L"   ") + std::wstring(L"Dividends received ") + FormatMoney(p.received); }
+    if (!realised.empty()) { drawLine(realised); }
+    if (p.cash != 0.0) {
+        drawLine(L"Cash " + FormatMoney(p.cash) + L"   With cash " + FormatMoney(p.value + p.cash));
     }
 }
 

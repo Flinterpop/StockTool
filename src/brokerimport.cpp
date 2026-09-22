@@ -266,6 +266,12 @@ bool ParseBrokerCsv(const std::string& utf8, ImportResult& out, std::wstring& er
         const size_t n = SplitCsv(line, row);
         if (!haveHeader) {
             if (lineNo > kMaxHeaderScan) { break; }
+            // WebBroker's preamble carries the account's uninvested cash.
+            double amount = 0.0;
+            if (n >= 2 && Key(row[0]) == L"cash" && ParseBrokerNumber(row[1], amount)) {
+                out.cash    = amount;
+                out.hasCash = true;
+            }
             const Columns c = Classify(row, n);
             if (c.symbol < 0 || c.qty < 0) { continue; }         // preamble ("As of ...", account name)
             cols = c;
@@ -416,6 +422,8 @@ void BuildImportPlan(const ImportResult& in, const std::wstring& cfgPath, Import
     out = ImportPlan{};
     out.skipped  = in.skipped;
     out.holdings = in.holdings;
+    out.cash     = in.cash;
+    out.hasCash  = in.hasCash;
     ImportContext ctx;
     ctx.knownCount = ReadAllSymbols(cfgPath, ctx.known.data(), ctx.known.size());
     ctx.mapCount   = ReadSymbolMap(cfgPath, ctx.map.data(), ctx.map.size());
@@ -465,6 +473,10 @@ std::wstring DescribeImportPlan(const ImportPlan& plan) {
              L" not in any watch list (marked *): tick the box below to add them, or map them in [symbol_map].";
         s += eol;
     }
+    if (plan.hasCash) {
+        s += L"Uninvested cash " + FormatMoney(plan.cash) + L" will be counted in this watch list's total.";
+        s += eol;
+    }
     s += eol;
     for (size_t i = 0; i < plan.count; ++i) {
         const ImportItem& it = plan.items[i];
@@ -494,6 +506,7 @@ bool ApplyImportPlan(const ImportPlan& plan, const Config& cfg, bool addUnknown,
     assert(!cfg.path.empty());
     assert(plan.count <= kMaxImportSymbols);
     written = 0;
+    if (plan.hasCash && !WriteCash(cfg.path, cfg.listName, plan.cash, err)) { return false; }
     size_t room = cfg.stockCount < kMaxStocks ? kMaxStocks - cfg.stockCount : 0;
     for (size_t i = 0; i < plan.count; ++i) {
         const ImportItem& it = plan.items[i];
