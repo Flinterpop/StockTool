@@ -2,7 +2,7 @@
 
 [![Release][release-badge]][release-latest]
 
-[release-badge]: https://img.shields.io/badge/release-v0.7.0-blue
+[release-badge]: https://img.shields.io/badge/release-v0.7.1-blue
 [release-latest]: https://github.com/Flinterpop/StockTool/releases/latest
 
 *Last updated: 22 Sep 2026*
@@ -80,7 +80,7 @@ cmake --preset default
 cmake --build --preset release      # or: --preset debug
 build\Release\StockTool.exe
 build\Release\stocktool_tests.exe   # Catch2 unit tests
-ISCC.exe /DAppVersion=0.7.0 installer\StockTool.iss   # -> installer\Output\StockTool-0.7.0-setup.exe
+ISCC.exe /DAppVersion=0.7.1 installer\StockTool.iss   # -> installer\Output\StockTool-0.7.1-setup.exe
 ```
 
 The build uses `/W4 /WX /permissive-` and the static CRT (vcpkg `x64-windows-static`), so the exe has no VC++ redistributable dependency. The first build seeds `stocktool.cfg` next to the exe; later builds leave it alone, because the app writes holdings, alerts and window state back into it. The UI-free parts (config, parsers, indicators, formatting, chart geometry, themes) are a static library (`stocktool_core`) shared by the app and the tests.
@@ -163,7 +163,7 @@ Notes:
 - **File > Export**: the watch list (symbol, name, currency, last, change, holding, value, 52-week range) or the current chart's bars (date, OHLCV, dividend) as UTF-8 CSV.
 - **File > Import from TD (CSV)…** reads a TD Direct Investing (WebBroker) export. An **Activity** export becomes `[transactions]` (buys, sells and dividend reinvestments; dividends, interest, fees and transfers are ignored; a missing price is taken from the net amount); a **Holdings** export becomes `[holdings]` (quantity and average cost, or book value ÷ quantity). The parser finds the header row by its column names (Symbol, Quantity, Price/Average Cost, Trade Date, Transaction Type, Market, Description), so preamble lines and column order do not matter, and it accepts `$1,234.50`, `(12.50)`, and ISO, `MM/DD/YYYY` or `12 Mar 2026` dates; UTF-8, UTF-16 and ANSI files all work. Symbols are mapped to Yahoo notation: `[symbol_map]` first, then a match against every watch list (`RY` → `RY.TO` when that is listed), then the Market column (`CA` → `.TO`, `TSXV` → `.V`). The `Cash` figure in a holdings export's preamble is picked up too and recorded in `[cash]` for the active list, so the strip can show the account's whole balance. A summary is shown before anything is written; rows already recorded are skipped, so re-importing the same file changes nothing, and a checkbox adds symbols that are in no watch list to the current one. Everything a holdings export writes — positions and cash — **replaces** what that symbol or list had, so import one account per watch list if you hold the same stock in two of them. Nothing leaves the machine and no credentials are involved — export from WebBroker (Accounts > Holdings / Activity > Export), then import the file.
 - The **news pane** (View > News pane) lists the latest headlines for the selected ticker; click one to open it in your browser. Google News (Canadian edition) by default; `news_source=yahoo` switches to Yahoo's feed.
-- Hover over the chart for a crosshair with date, O/H/L/C, volume, dividend and RSI; in Compare mode the tooltip lists every ticker's % change at that date.
+- Hover over the chart for a crosshair with date, O/H/L/C, volume, dividend and RSI (on 1D and 5D just the time and price at that point); in Compare mode the tooltip lists every ticker's % change at that date.
 - **Help > Data source health…** shows, per endpoint (chart, fundamentals, search, FX, news, crumb), the last HTTP status, latency, time since the last success, consecutive failures and the last error, plus the fetch-queue depth and the config path in use; it refreshes every 2 s. When a provider answers **HTTP 429** (rate limited) the app backs off that endpoint for 1, 2, 4 then 8 minutes, doubling on repeats, and says so in the status bar and the health window.
 - **Fallback data source.** When the chart endpoint fails for a ticker (unreachable, HTTP error, rate-limit backoff, unparseable reply) the same bars are fetched from **TMX Money** (`fallback_provider=tmx`, the site behind money.tmx.com): daily/weekly/monthly bars only, so 1D/5D are empty from the fallback, and no fundamentals. Symbols are translated automatically (`RY.TO` → `RY`, `RCI-B.TO` → `RCI.B`, `AAPL` → `AAPL:US`, `^GSPTSE` → `^TSX`); mutual-fund IDs and FX pairs have no equivalent. Data that came from the fallback is labelled in the header (**TMX Money (fallback)**) and the status line, and the health panel has a `tmx-fallback` row. FX rates for CAD pairs fall back to the **Bank of Canada** daily average (Valet API). `fallback_provider=none` turns both off.
 - The tray icon's tooltip shows every ticker's last price; left-click shows the window, right-click gives Show / Refresh / Exit.

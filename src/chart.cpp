@@ -502,9 +502,14 @@ void DrawHover(Graphics& g, const Layout& L, const ChartInput& in, const PriceSc
 
     const DateStyle ds = in.range->intraday ? DateStyle::FullTime : DateStyle::Full;
     std::wstring tip = FormatDate(c.time, in.data->meta.gmtOffsetSec, ds);
-    tip += L"\nO " + FormatPrice(c.open) + L"   H " + FormatPrice(c.high);
-    tip += L"\nL " + FormatPrice(c.low)  + L"   C " + FormatPrice(c.close);
-    tip += L"\nVol " + FormatVolume(c.volume);
+    if (in.range->intraday) {
+        // A 5-minute bar's OHLC reads as noise; show the price at that moment.
+        tip += L"\n" + FormatPrice(c.close);
+    } else {
+        tip += L"\nO " + FormatPrice(c.open) + L"   H " + FormatPrice(c.high);
+        tip += L"\nL " + FormatPrice(c.low)  + L"   C " + FormatPrice(c.close);
+        tip += L"\nVol " + FormatVolume(c.volume);
+    }
     const double div = DividendOnBar(*in.data, idx);
     if (div > 0.0) { tip += L"\nDividend " + FormatPrice(div) + L" (ex-date)"; }
     if (in.opts.benchmark && in.bench != nullptr) {
