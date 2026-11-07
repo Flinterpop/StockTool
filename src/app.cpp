@@ -91,6 +91,7 @@ constexpr UINT     kTrayId       = 1;
 constexpr int kMargin      = 10;
 constexpr int kListW       = 250;
 constexpr int kListItemH   = 44;
+constexpr int kGroupHeaderH = 18;    // "Monitor" / "Watching", over the first row of each group
 constexpr int kTabsH       = 26;
 constexpr int kPortfolioBase = 46;   // label, total and the Day/Total line
 constexpr int kPortfolioLine = 16;   // each optional line under it
@@ -282,7 +283,7 @@ bool App::Create(HINSTANCE hInst, int nCmdShow, std::wstring& err) {
         return false;
     }
 
-    std::array<ACCEL, 7 + kRanges.size()> accel{};
+    std::array<ACCEL, 8 + kRanges.size()> accel{};
     size_t n = 0;
     accel[n++] = { FVIRTKEY, VK_F5, static_cast<WORD>(IDM_REFRESH) };
     accel[n++] = { FVIRTKEY, VK_F1, static_cast<WORD>(IDM_HELP) };
@@ -291,6 +292,7 @@ bool App::Create(HINSTANCE hInst, int nCmdShow, std::wstring& err) {
     accel[n++] = { FVIRTKEY, VK_F2, static_cast<WORD>(IDM_EDIT) };
     accel[n++] = { FVIRTKEY | FCONTROL, VK_UP, static_cast<WORD>(IDM_MOVEUP) };
     accel[n++] = { FVIRTKEY | FCONTROL, VK_DOWN, static_cast<WORD>(IDM_MOVEDOWN) };
+    accel[n++] = { FVIRTKEY | FCONTROL, 'M', static_cast<WORD>(IDM_MONITOR) };
     for (size_t i = 0; i < kRanges.size(); ++i) {
         accel[n++] = { FVIRTKEY | FCONTROL, static_cast<WORD>('1' + i), static_cast<WORD>(IDM_RANGE_BASE + i) };
     }
@@ -380,6 +382,11 @@ LRESULT App::Handle(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_SETTINGCHANGE: OnSettingChange(lp); return 0;
     case WM_MEASUREITEM:  OnMeasureItem(reinterpret_cast<MEASUREITEMSTRUCT*>(lp)); return TRUE;
     case WM_DRAWITEM:     OnDrawItem(reinterpret_cast<const DRAWITEMSTRUCT*>(lp)); return TRUE;
+    case WM_INITMENUPOPUP: {  // the menu bar's Ticker menu and the right-click copy of it
+        const bool on = HasStocks() && cfg_.stocks[selected_].monitored;
+        CheckMenuItem(hMenu_, IDM_MONITOR, MF_BYCOMMAND | (on ? MF_CHECKED : MF_UNCHECKED));
+        return 0;
+    }
     case WM_CTLCOLORBTN:
     case WM_CTLCOLORSTATIC:
         SetBkColor(reinterpret_cast<HDC>(wp), theme_->bgRef);
@@ -494,7 +501,11 @@ void App::CreateFonts() {
     for (HWND h : hToolBtns_) {
         if (h != nullptr) { SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(hUiFont_), TRUE); }
     }
-    if (hList_ != nullptr) { SendMessageW(hList_, LB_SETITEMHEIGHT, 0, static_cast<LPARAM>(Px(kListItemH))); }
+    if (hList_ != nullptr) {
+        for (size_t row = 0; row < rows_.count; ++row) {
+            SendMessageW(hList_, LB_SETITEMHEIGHT, static_cast<WPARAM>(row), static_cast<LPARAM>(ListRowHeight(row)));
+        }
+    }
 }
 
 void App::CreateControls() {
@@ -512,7 +523,7 @@ void App::CreateControls() {
     assert(hTabs_ != nullptr);
     hList_ = CreateWindowExW(0, L"LISTBOX", nullptr,
                              WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_BORDER | LBS_NOTIFY |
-                                 LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | LBS_NOINTEGRALHEIGHT,
+                                 LBS_OWNERDRAWVARIABLE | LBS_HASSTRINGS | LBS_NOINTEGRALHEIGHT,
                              0, 0, 10, 10, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LIST)),
                              hInst_, nullptr);
     assert(hList_ != nullptr);
@@ -563,7 +574,7 @@ void App::CreateToolTips() {
                          L"Click a tab to switch. The List menu creates, renames and deletes lists.");
     AddTip(hList_,       L"Watch list\r\n"
                          L"Click to select a ticker, double-click (or F2) to edit it, "
-                         L"right-click for the Ticker menu.");
+                         L"right-click for the Ticker menu. Ctrl+M moves it between Monitor and Watching.");
     AddAreaTip(kTipPortfolio, portfolioRect_);
     AddAreaTip(kTipHeader, headerRect_);
 }
@@ -609,12 +620,22 @@ void App::UpdateAreaTips() {
 }
 
 void App::RebuildList() {
+    rows_ = BuildListRows(cfg_);   // first: adding a string asks OnMeasureItem for that row's height
     SendMessageW(hList_, LB_RESETCONTENT, 0, 0);
-    for (size_t i = 0; i < cfg_.stockCount; ++i) {
-        SendMessageW(hList_, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(cfg_.stocks[i].symbol.c_str()));
+    for (size_t row = 0; row < rows_.count; ++row) {
+        const std::wstring& symbol = cfg_.stocks[rows_.stockAt[row]].symbol;
+        SendMessageW(hList_, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(symbol.c_str()));
     }
     if (selected_ >= cfg_.stockCount) { selected_ = 0; }
-    if (HasStocks()) { SendMessageW(hList_, LB_SETCURSEL, static_cast<WPARAM>(selected_), 0); }
+    if (HasStocks()) { SendMessageW(hList_, LB_SETCURSEL, static_cast<WPARAM>(rows_.rowOf[selected_]), 0); }
+}
+
+// The first row of a group also carries its heading. A list-box item cannot be
+// 256 px or taller, which the heading would reach at 400 % scaling.
+int App::ListRowHeight(size_t row) const {
+    constexpr int kMaxItemPx = 255;
+    const int dip = kListItemH + (rows_.HeaderAbove(row) ? kGroupHeaderH : 0);
+    return min(Px(dip), kMaxItemPx);
 }
 
 // One tab per watch list; hidden while there is only the default list.
@@ -883,8 +904,9 @@ void App::EnsureFxRates() {
 void App::SelectStock(size_t index) {
     if (index >= cfg_.stockCount) { return; }
     selected_ = index;
-    if (static_cast<size_t>(SendMessageW(hList_, LB_GETCURSEL, 0, 0)) != index) {
-        SendMessageW(hList_, LB_SETCURSEL, static_cast<WPARAM>(index), 0);
+    const size_t row = rows_.rowOf[index];
+    if (static_cast<size_t>(SendMessageW(hList_, LB_GETCURSEL, 0, 0)) != row) {
+        SendMessageW(hList_, LB_SETCURSEL, static_cast<WPARAM>(row), 0);
     }
     // Cached data shows immediately; a silent refresh is queued behind it.
     RequestChart(!chartValid_[index]);
@@ -914,8 +936,10 @@ void App::RedrawAll() {
 }
 
 void App::InvalidateListItem(size_t index) {
+    assert(index < kMaxStocks);
     RECT rc{};
-    if (SendMessageW(hList_, LB_GETITEMRECT, static_cast<WPARAM>(index), reinterpret_cast<LPARAM>(&rc)) != LB_ERR) {
+    const WPARAM row = static_cast<WPARAM>(rows_.rowOf[index]);
+    if (SendMessageW(hList_, LB_GETITEMRECT, row, reinterpret_cast<LPARAM>(&rc)) != LB_ERR) {
         InvalidateRect(hList_, &rc, FALSE);   // the item paints its own background
     }
 }
@@ -1091,7 +1115,8 @@ void App::CheckAlerts(size_t stock, const PriceChange& pc) {
 void App::UpdateTrayTip() {
     if (!trayAdded_) { return; }
     std::wstring tip = kWindowTitle;
-    for (size_t i = 0; i < cfg_.stockCount; ++i) {
+    for (size_t row = 0; row < rows_.count; ++row) {   // screen order: the tip is short, Monitor gets in first
+        const size_t i = rows_.stockAt[row];
         const PriceChange pc = ComputeChange((*summaries_)[i]);
         if (!pc.valid) { continue; }
         const std::wstring line = L"\n" + cfg_.stocks[i].symbol + L"  " + FormatPrice(pc.last) + L"  " + FormatPct(pc.pct);
@@ -1163,13 +1188,15 @@ bool App::AddTicker(const StockEntry& entry, std::wstring& err) {
     if (!WriteStockEntry(cfg_, entry, err)) { return false; }
     const size_t index = cfg_.stockCount;
     cfg_.stocks[index] = entry;
+    // New tickers join Watching, unless another list already monitors the symbol.
+    cfg_.stocks[index].monitored = ReadMonitored(cfg_.path, entry.symbol);
     ++cfg_.stockCount;
     (*summaries_)[index] = QuoteData{};
     chartValid_[index]   = false;
     insetValid_[index]   = false;
     (*news_)[index]      = NewsCache{};
     alerts_[index]       = AlertState{};
-    SendMessageW(hList_, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(entry.symbol.c_str()));
+    RebuildList();
 
     fetcher_.UpdateConfig(cfg_);   // drops pending jobs, so re-request everything
     RequestAllSummaries();
@@ -1211,7 +1238,8 @@ bool App::ApplyTickerEdit(size_t index, const StockEntry& edited, std::wstring& 
              WriteStockOrder(cfg_, err) &&
              WriteHolding(cfg_.path, e.symbol, e.holding, err) &&
              WriteAlert(cfg_.path, e.symbol, e.alert, err) &&
-             WriteCurrency(cfg_.path, e.symbol, e.currency, err);
+             WriteCurrency(cfg_.path, e.symbol, e.currency, err) &&
+             WriteMonitored(cfg_.path, e.symbol, e.monitored, err);
     } else {
         // Name/currency only: WriteStockEntry never clears a currency
         // override, so write it explicitly (an empty code deletes the key).
@@ -1249,6 +1277,7 @@ void App::OnRemoveTicker() {
         return;
     }
     const size_t       index  = selected_;
+    const size_t       row    = rows_.rowOf[index];
     const std::wstring symbol = cfg_.stocks[index].symbol;
     std::wstring err;
     if (!DeleteStockEntry(cfg_, symbol, err)) {
@@ -1272,13 +1301,14 @@ void App::OnRemoveTicker() {
     chartValid_[cfg_.stockCount]   = false;
     insetValid_[cfg_.stockCount]   = false;
     (*news_)[cfg_.stockCount]      = NewsCache{};
-    SendMessageW(hList_, LB_DELETESTRING, static_cast<WPARAM>(index), 0);
+    selected_ = 0;
+    RebuildList();
 
     fetcher_.UpdateConfig(cfg_);
     RequestAllSummaries();
     RequestQuotes();
-    if (HasStocks()) { SelectStock((index < cfg_.stockCount) ? index : cfg_.stockCount - 1); }
-    else             { selected_ = 0; }
+    // Select whatever now sits where the removed row was on screen.
+    if (HasStocks()) { SelectStock(rows_.stockAt[min(row, cfg_.stockCount - 1)]); }
     Layout();
     RedrawAll();
     SetStatus(L"Removed " + symbol);
@@ -1288,8 +1318,9 @@ void App::OnMoveTicker(int delta) {
     assert(delta == 1 || delta == -1);
     if (!HasStocks()) { return; }
     const size_t i = selected_;
-    if ((delta < 0 && i == 0) || (delta > 0 && i + 1 >= cfg_.stockCount)) { return; }
-    const size_t j = (delta < 0) ? i - 1 : i + 1;
+    // Within its own group: tickers of the other group between the two keep their places.
+    const size_t j = NeighbourInGroup(cfg_, i, delta);
+    if (j >= cfg_.stockCount) { return; }
     std::swap(cfg_.stocks[i], cfg_.stocks[j]);
     std::wstring err;
     if (!WriteStockOrder(cfg_, err)) {
@@ -1309,6 +1340,24 @@ void App::OnMoveTicker(int delta) {
     fetcher_.UpdateConfig(cfg_);
     RequestAllSummaries();
     SelectStock(j);
+}
+
+// Moves the selected ticker between Monitor and Watching. Only the row order
+// changes, so nothing is fetched again.
+void App::OnToggleMonitor() {
+    if (!HasStocks()) { return; }
+    assert(selected_ < cfg_.stockCount);
+    StockEntry& e = cfg_.stocks[selected_];
+    const bool next = !e.monitored;
+    std::wstring err;
+    if (!WriteMonitored(cfg_.path, e.symbol, next, err)) {
+        SetStatus(err);
+        return;
+    }
+    e.monitored = next;
+    RebuildList();
+    InvalidateRect(hList_, nullptr, FALSE);
+    SetStatus(e.symbol + (next ? L" moved to Monitor" : L" moved to Watching"));
 }
 
 void App::OnEditHolding() {
@@ -1563,8 +1612,9 @@ bool App::WriteTextFile(const std::wstring& path, const std::string& utf8, std::
 void App::OnExportList() {
     std::wstring path;
     if (!SaveCsvDialog(L"watchlist.csv", path)) { return; }
-    std::string csv = "Symbol,Name,Currency,Last,Change,Change%,PrevClose,Shares,AvgCost,Value,52wHigh,52wLow\r\n";
-    for (size_t i = 0; i < cfg_.stockCount; ++i) {
+    std::string csv = "Symbol,Name,Currency,Last,Change,Change%,PrevClose,Shares,AvgCost,Value,52wHigh,52wLow,Group\r\n";
+    for (size_t row = 0; row < rows_.count; ++row) {   // screen order
+        const size_t i = rows_.stockAt[row];
         const StockEntry& e  = cfg_.stocks[i];
         const QuoteData&  q  = (*summaries_)[i];
         const PriceChange pc = ComputeChange(q);
@@ -1579,7 +1629,8 @@ void App::OnExportList() {
                "," + (pos.acb > 0.0 ? CsvNum(pos.acb, 4) : "") +
                "," + (pos.qty > 0.0 && pc.valid ? CsvNum(pos.qty * pc.last, 2) : "") +
                "," + (q.valid && q.meta.wk52High > 0.0 ? CsvNum(q.meta.wk52High, 2) : "") +
-               "," + (q.valid && q.meta.wk52Low > 0.0 ? CsvNum(q.meta.wk52Low, 2) : "") + "\r\n";
+               "," + (q.valid && q.meta.wk52Low > 0.0 ? CsvNum(q.meta.wk52Low, 2) : "") +
+               "," + (e.monitored ? "Monitor" : "Watching") + "\r\n";
     }
     std::wstring err;
     if (!WriteTextFile(path, csv, err)) { SetStatus(err); return; }
@@ -1677,7 +1728,7 @@ LRESULT App::OnNotify(const NMHDR* hdr) {
 void App::OnCommand(int id, UINT code) {
     if (id == IDC_LIST && code == LBN_SELCHANGE) {
         const LRESULT sel = SendMessageW(hList_, LB_GETCURSEL, 0, 0);
-        if (sel != LB_ERR) { SelectStock(static_cast<size_t>(sel)); }
+        if (sel != LB_ERR && static_cast<size_t>(sel) < rows_.count) { SelectStock(rows_.stockAt[static_cast<size_t>(sel)]); }
         return;
     }
     if (id == IDC_LIST && code == LBN_DBLCLK) {
@@ -1734,6 +1785,7 @@ void App::OnCommand(int id, UINT code) {
     case IDM_REMOVE:    OnRemoveTicker(); break;
     case IDM_MOVEUP:    OnMoveTicker(-1); break;
     case IDM_MOVEDOWN:  OnMoveTicker(+1); break;
+    case IDM_MONITOR:   OnToggleMonitor(); break;
     case IDM_HOLDING:   OnEditHolding(); break;
     case IDM_ALERTS:    OnEditAlerts(); break;
     case IDM_LIST_NEW:    OnNewList(); break;
@@ -1764,7 +1816,8 @@ void App::OnContextMenu(HWND source, int x, int y) {
         POINT p{ x, y };
         ScreenToClient(hList_, &p);
         const LRESULT hit = SendMessageW(hList_, LB_ITEMFROMPOINT, 0, MAKELPARAM(p.x, p.y));
-        if (HIWORD(hit) == 0) { SelectStock(static_cast<size_t>(LOWORD(hit))); }
+        const size_t row = static_cast<size_t>(LOWORD(hit));
+        if (HIWORD(hit) == 0 && row < rows_.count) { SelectStock(rows_.stockAt[row]); }
     }
     HMENU ticker = GetSubMenu(hMenu_, 2);
     assert(ticker != nullptr);
@@ -1938,17 +1991,24 @@ void App::OnSettingChange(LPARAM lp) {
 
 void App::OnMeasureItem(MEASUREITEMSTRUCT* mis) {
     assert(mis != nullptr);
-    if (mis->CtlID == static_cast<UINT>(IDC_LIST)) { mis->itemHeight = static_cast<UINT>(Px(kListItemH)); }
+    if (mis->CtlID == static_cast<UINT>(IDC_LIST)) { mis->itemHeight = static_cast<UINT>(ListRowHeight(mis->itemID)); }
 }
 
 void App::OnDrawItem(const DRAWITEMSTRUCT* dis) {
     assert(dis != nullptr);
     if (dis->CtlID != static_cast<UINT>(IDC_LIST) || dis->itemID == static_cast<UINT>(-1)) { return; }
-    const size_t index = dis->itemID;
-    if (index >= cfg_.stockCount) { return; }
+    const size_t row = dis->itemID;
+    if (row >= rows_.count) { return; }
     Graphics g(dis->hDC);
     g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
-    PaintListItem(g, dis->rcItem, index, (dis->itemState & ODS_SELECTED) != 0);
+    RECT body = dis->rcItem;
+    if (rows_.HeaderAbove(row)) {
+        // Taken from the bottom up, so a row clamped at extreme scaling keeps its ticker whole.
+        body.top = max(body.top, body.bottom - Px(kListItemH));
+        const RECT heading{ dis->rcItem.left, dis->rcItem.top, dis->rcItem.right, body.top };
+        PaintGroupHeader(g, heading, rows_.IsMonitorRow(row) ? L"Monitor" : L"Watching");
+    }
+    PaintListItem(g, body, rows_.stockAt[row], (dis->itemState & ODS_SELECTED) != 0);
 }
 
 void App::OnSummaryReady(size_t stock) {
@@ -2660,6 +2720,23 @@ void App::PaintStatus(Graphics& g) {
         text += L"   ·   auto-refresh every " + std::to_wstring(cfg_.refreshSeconds) + L" s";
     }
     g.DrawString(text.c_str(), -1, &font, ToRectF(statusRect_), &fmt, &grey);
+}
+
+void App::PaintGroupHeader(Graphics& g, const RECT& rcItem, const wchar_t* label) {
+    assert(label != nullptr);
+    const Theme& th = *theme_;
+    const RectF rc = ToRectF(rcItem);
+    SolidBrush bg(th.bg);
+    g.FillRectangle(&bg, rc);
+    Pen divider(th.listDivider, 1.0f);
+    g.DrawLine(&divider, rc.X, rc.Y + rc.Height - 1, rc.X + rc.Width, rc.Y + rc.Height - 1);
+    const Font font = MakeFont(8.5f, scale_, FontStyleBold);
+    SolidBrush grey(th.textMuted);
+    StringFormat fmt;
+    fmt.SetLineAlignment(StringAlignmentCenter);
+    fmt.SetFormatFlags(StringFormatFlagsNoWrap);
+    const float pad = 8.0f * scale_;
+    g.DrawString(label, -1, &font, RectF(rc.X + pad, rc.Y, rc.Width - pad, rc.Height), &fmt, &grey);
 }
 
 void App::PaintListItem(Graphics& g, const RECT& rcItem, size_t index, bool selected) {

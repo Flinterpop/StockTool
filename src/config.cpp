@@ -92,7 +92,10 @@ constexpr char kDefaultConfigText[] =
     "[symbol_map]\r\n"
     "\r\n"
     "; watch list=uninvested cash, added to that list portfolio total\r\n"
-    "[cash]\r\n";
+    "[cash]\r\n"
+    "\r\n"
+    "; symbol=1   (in the Monitor group; written by Ticker > Monitor closely)\r\n"
+    "[monitor]\r\n";
 
 constexpr size_t kSectionBufChars = 8192;
 constexpr wchar_t kSettings[] = L"settings";
@@ -103,6 +106,7 @@ constexpr wchar_t kCurrency[] = L"currency";
 constexpr wchar_t kTransactions[] = L"transactions";
 constexpr wchar_t kSymbolMap[] = L"symbol_map";
 constexpr wchar_t kCash[]      = L"cash";
+constexpr wchar_t kMonitor[]   = L"monitor";
 // [cash] is keyed by watch-list name, and an INI key cannot be empty.
 constexpr wchar_t kDefaultListKey[] = L"(default)";
 constexpr wchar_t kState[]    = L"state";
@@ -204,6 +208,7 @@ bool ReadStockSection(const std::wstring& path, const std::wstring& section, Con
         std::wstring ignored;
         if (!NormalizeCurrency(e.currency, ignored)) { e.currency.clear(); }
         ReadTransactions(path, e);
+        e.monitored = ReadMonitored(path, e.symbol);
         out.stocks[out.stockCount] = e;
         ++out.stockCount;
     }
@@ -549,6 +554,7 @@ bool WriteStockEntry(const Config& cfg, const StockEntry& entry, std::wstring& e
     if (alertSet && !WriteAlert(cfg.path, entry.symbol, entry.alert, err)) { return false; }
     if (!entry.currency.empty() && !WriteCurrency(cfg.path, entry.symbol, entry.currency, err)) { return false; }
     if (entry.txCount > 0 && !WriteTransactions(cfg.path, entry.symbol, entry.tx.data(), entry.txCount, err)) { return false; }
+    if (entry.monitored && !WriteMonitored(cfg.path, entry.symbol, true, err)) { return false; }
     return true;
 }
 
@@ -567,6 +573,7 @@ bool DeleteStockEntry(const Config& cfg, const std::wstring& symbol, std::wstrin
     if (!WriteString(cfg.path, kHoldings, symbol.c_str(), nullptr, err)) { return false; }
     if (!WriteString(cfg.path, kAlerts, symbol.c_str(), nullptr, err)) { return false; }
     if (!WriteString(cfg.path, kCurrency, symbol.c_str(), nullptr, err)) { return false; }
+    if (!WriteMonitored(cfg.path, symbol, false, err)) { return false; }
     return WriteTransactions(cfg.path, symbol, nullptr, 0, err);
 }
 
@@ -734,6 +741,48 @@ double ReadCash(const std::wstring& path, const std::wstring& list) {
 bool WriteCurrency(const std::wstring& path, const std::wstring& symbol, const std::wstring& code, std::wstring& err) {
     assert(!symbol.empty());
     return WriteString(path, kCurrency, symbol.c_str(), code.empty() ? nullptr : code.c_str(), err);
+}
+
+bool WriteMonitored(const std::wstring& path, const std::wstring& symbol, bool monitored, std::wstring& err) {
+    assert(!path.empty());
+    assert(!symbol.empty());
+    return WriteString(path, kMonitor, symbol.c_str(), monitored ? L"1" : nullptr, err);
+}
+
+bool ReadMonitored(const std::wstring& path, const std::wstring& symbol) {
+    assert(!path.empty());
+    assert(!symbol.empty());
+    return ReadBool(path, kMonitor, symbol.c_str(), false);
+}
+
+ListRows BuildListRows(const Config& cfg) {
+    assert(cfg.stockCount <= kMaxStocks);
+    ListRows rows;
+    for (size_t pass = 0; pass < 2; ++pass) {
+        const bool wantMonitored = (pass == 0);
+        for (size_t i = 0; i < cfg.stockCount; ++i) {
+            if (cfg.stocks[i].monitored != wantMonitored) { continue; }
+            rows.stockAt[rows.count] = i;
+            rows.rowOf[i] = rows.count;
+            ++rows.count;
+        }
+        if (wantMonitored) { rows.monitorCount = rows.count; }
+    }
+    assert(rows.count == cfg.stockCount);
+    return rows;
+}
+
+size_t NeighbourInGroup(const Config& cfg, size_t stock, int delta) {
+    assert(stock < cfg.stockCount);
+    assert(delta == 1 || delta == -1);
+    const bool group = cfg.stocks[stock].monitored;
+    size_t i = stock;
+    for (size_t guard = 0; guard < cfg.stockCount; ++guard) {
+        if ((delta < 0 && i == 0) || (delta > 0 && i + 1 >= cfg.stockCount)) { break; }
+        i = (delta < 0) ? i - 1 : i + 1;
+        if (cfg.stocks[i].monitored == group) { return i; }
+    }
+    return cfg.stockCount;
 }
 
 } // namespace st

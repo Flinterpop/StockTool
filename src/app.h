@@ -103,6 +103,7 @@ private:
     bool ApplyTickerEdit(size_t index, const StockEntry& edited, std::wstring& err);
     void OnRemoveTicker();
     void OnMoveTicker(int delta);
+    void OnToggleMonitor();
     void OnEditHolding();
     void OnEditTransactions();
     void OnEditAlerts();
@@ -162,6 +163,7 @@ private:
     void RequestQuotes();
     void EnsureFxRates();
     void RebuildList();
+    int  ListRowHeight(size_t row) const;
     void SetStatus(const std::wstring& text);
     void SaveState();
     void ApplyStartupState(int nCmdShow);
@@ -190,6 +192,7 @@ private:
     void PaintStats(Gdiplus::Graphics& g);
     void PaintStatus(Gdiplus::Graphics& g);
     void PaintListItem(Gdiplus::Graphics& g, const RECT& rc, size_t index, bool selected);
+    void PaintGroupHeader(Gdiplus::Graphics& g, const RECT& rc, const wchar_t* label);
 
     // layout rectangles (client px)
     RECT toolbarRect_{};
@@ -264,7 +267,8 @@ private:
     std::array<AlertState, kMaxStocks>                  alerts_{};
     std::array<CompareEntry, kMaxStocks>                compareEntries_{};
 
-    size_t selected_ = 0;
+    ListRows rows_;             // list-box row <-> cfg_.stocks index; rebuilt by RebuildList
+    size_t selected_ = 0;       // index into cfg_.stocks, not a list-box row
     size_t range_    = kRange1Y;
     int    hoverX_   = -1;
     int    hoverY_   = -1;

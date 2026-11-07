@@ -2,10 +2,10 @@
 
 [![Release][release-badge]][release-latest]
 
-[release-badge]: https://img.shields.io/badge/release-v0.7.1-blue
+[release-badge]: https://img.shields.io/badge/release-v0.8.0-blue
 [release-latest]: https://github.com/Flinterpop/StockTool/releases/latest
 
-*Last updated: 22 Sep 2026*
+*Last updated: 6 Nov 2026*
 
 A Win32 C++ desktop app that tracks configurable watch lists of stocks and funds and shows the usual quote-page views: price chart (line or candles) with range presets, SMA/Bollinger/RSI indicators, dividend markers, a 1Y/5Y trend inset, a compare-all overlay, volume bars, hover crosshair, day/52-week/fundamentals stats, a headlines pane, holdings with a currency-converted portfolio total, price alerts, CSV export, a tray icon and a light/dark theme. No MFC, no frameworks — plain Win32, GDI+, WinHTTP, and `nlohmann/json` from vcpkg.
 
@@ -64,6 +64,9 @@ TDB902=0P0000A30L
 [cash]                    ; watch list=uninvested cash counted in that list's total
 (default)=22747.06
 
+[monitor]                 ; symbol=1: in the Monitor group, above Watching (Ticker > Monitor closely); shared by every list
+RY.TO=1
+
 [state]                   ; written by the app on exit: window placement, range, toggles, selection, list
 ```
 
@@ -80,7 +83,7 @@ cmake --preset default
 cmake --build --preset release      # or: --preset debug
 build\Release\StockTool.exe
 build\Release\stocktool_tests.exe   # Catch2 unit tests
-ISCC.exe /DAppVersion=0.7.1 installer\StockTool.iss   # -> installer\Output\StockTool-0.7.1-setup.exe
+ISCC.exe /DAppVersion=0.8.0 installer\StockTool.iss   # -> installer\Output\StockTool-0.8.0-setup.exe
 ```
 
 The build uses `/W4 /WX /permissive-` and the static CRT (vcpkg `x64-windows-static`), so the exe has no VC++ redistributable dependency. The first build seeds `stocktool.cfg` next to the exe; later builds leave it alone, because the app writes holdings, alerts and window state back into it. The UI-free parts (config, parsers, indicators, formatting, chart geometry, themes) are a static library (`stocktool_core`) shared by the app and the tests.
@@ -127,7 +130,7 @@ Artifacts land in `dist\` (zip) and `installer\Output\` (installer), both ignore
 | `src/fetcher.*` | Worker thread with a bounded job queue (summary, chart, inset, benchmark, fundamentals, search, FX, news); posts `WM_APP_*` messages to the UI thread; cookie/crumb handshake for fundamentals; per-endpoint health, HTTP 429 backoff, and the TMX Money / Bank of Canada fallbacks. |
 | `src/http.*` | Blocking HTTPS GET and POST on WinHTTP with a persistent session (cookies). |
 | `src/quote_parser.*` | Provider JSON to `QuoteData` (meta, trading session, OHLCV bars, dividends), `QuoteStats`, `SearchHit`, `NewsItem`; the TMX Money reply and its symbol mapping; a small RSS reader for Google News. |
-| `src/config.*` | `stocktool.cfg` reading/writing: settings, watch lists, holdings, transactions, alerts, currency overrides, symbol map, cash, view state; config path resolution. |
+| `src/config.*` | `stocktool.cfg` reading/writing: settings, watch lists, holdings, transactions, alerts, currency overrides, symbol map, cash, monitor flags, view state; config path resolution. Also the list-row order (Monitor first). |
 | `src/textfmt.*` | Price/money/percent/compact/date formatting, ISO dates. |
 | `src/common.h` | Fixed-capacity data types, the range presets and the market-open test. |
 | `src/gdiplus_inc.h` | The one place GDI+ is included, with `NOMINMAX` and `<objidl.h>` ordered so it compiles under `WIN32_LEAN_AND_MEAN`. |
@@ -159,6 +162,7 @@ Notes:
 - The trend inset can be **dragged** anywhere inside the plot; its position is remembered. Green **D** markers on the chart are ex-dividend dates; hover for the amount.
 - **Add… (Ctrl+N / Ctrl+F)** has a search box: type a company name or partial symbol and pick from the results — the fields fill in; double-click adds straight away. The dialog stays open after each add; **Close** (or Esc) dismisses it. A currency code can be entered to override what the provider reports for that listing.
 - **Ticker** menu (also right-click on the list): **Add…**, **Edit… (F2, or double-click a row)**, **Remove**, **Move up/down (Ctrl+Up/Down)**, **Holding…** (shares + average cost → portfolio strip above the list, converted into `portfolio_currency`, with a dividend-income estimate and, when `[cash]` has a figure for the list, an uninvested-cash line and a with-cash total; holding line in the header), **Transactions…** (dated buys and sells; average cost, cost base, unrealised and realised gain and dividends received are computed from them and replace the manual holding) and **Alerts…** (price above/below).
+- **Ticker > Monitor closely (Ctrl+M)**, also on the right-click menu, moves the selected ticker into a **Monitor** group at the top of the list, above the rest under **Watching**; again moves it back. Both groups are on screen together, all of it keeps refreshing, and the portfolio strip covers the whole list. Move up/down stay inside a group. The headings appear once something is monitored, so a list that does not use them looks as it always did. The flag belongs to the symbol, in every list that has it (`[monitor]`).
 - **List** menu / tabs above the watch list: **New list…**, **Rename list…**, **Delete list**, and one entry per list to switch. The default list cannot be renamed or deleted. The portfolio strip covers the active list.
 - **File > Export**: the watch list (symbol, name, currency, last, change, holding, value, 52-week range) or the current chart's bars (date, OHLCV, dividend) as UTF-8 CSV.
 - **File > Import from TD (CSV)…** reads a TD Direct Investing (WebBroker) export. An **Activity** export becomes `[transactions]` (buys, sells and dividend reinvestments; dividends, interest, fees and transfers are ignored; a missing price is taken from the net amount); a **Holdings** export becomes `[holdings]` (quantity and average cost, or book value ÷ quantity). The parser finds the header row by its column names (Symbol, Quantity, Price/Average Cost, Trade Date, Transaction Type, Market, Description), so preamble lines and column order do not matter, and it accepts `$1,234.50`, `(12.50)`, and ISO, `MM/DD/YYYY` or `12 Mar 2026` dates; UTF-8, UTF-16 and ANSI files all work. Symbols are mapped to Yahoo notation: `[symbol_map]` first, then a match against every watch list (`RY` → `RY.TO` when that is listed), then the Market column (`CA` → `.TO`, `TSXV` → `.V`). The `Cash` figure in a holdings export's preamble is picked up too and recorded in `[cash]` for the active list, so the strip can show the account's whole balance. A summary is shown before anything is written; rows already recorded are skipped, so re-importing the same file changes nothing, and a checkbox adds symbols that are in no watch list to the current one. Everything a holdings export writes — positions and cash — **replaces** what that symbol or list had, so import one account per watch list if you hold the same stock in two of them. Nothing leaves the machine and no credentials are involved — export from WebBroker (Accounts > Holdings / Activity > Export), then import the file.

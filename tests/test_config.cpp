@@ -52,6 +52,112 @@ constexpr char kIni[] =
 
 } // namespace
 
+namespace {
+
+Config FourTickers(bool a, bool b, bool c, bool d) {
+    Config cfg;
+    const std::array<const wchar_t*, 4> symbols{ L"A", L"B", L"C", L"D" };
+    const std::array<bool, 4> monitored{ a, b, c, d };
+    for (size_t i = 0; i < symbols.size(); ++i) {
+        cfg.stocks[i].symbol = symbols[i];
+        cfg.stocks[i].monitored = monitored[i];
+    }
+    cfg.stockCount = symbols.size();
+    return cfg;
+}
+
+} // namespace
+
+TEST_CASE("BuildListRows puts Monitor first and keeps file order inside each group") {
+    const ListRows rows = BuildListRows(FourTickers(false, true, false, true));
+    REQUIRE(rows.count == 4);
+    CHECK(rows.monitorCount == 2);
+    CHECK(rows.stockAt == std::array<size_t, kMaxStocks>{ 1, 3, 0, 2 });
+    for (size_t row = 0; row < rows.count; ++row) { CHECK(rows.rowOf[rows.stockAt[row]] == row); }
+    CHECK(rows.HeaderAbove(0));
+    CHECK_FALSE(rows.HeaderAbove(1));
+    CHECK(rows.HeaderAbove(2));
+    CHECK_FALSE(rows.HeaderAbove(3));
+    CHECK(rows.IsMonitorRow(1));
+    CHECK_FALSE(rows.IsMonitorRow(2));
+}
+
+TEST_CASE("BuildListRows shows no headings until something is monitored") {
+    const ListRows none = BuildListRows(FourTickers(false, false, false, false));
+    CHECK(none.monitorCount == 0);
+    CHECK(none.stockAt == std::array<size_t, kMaxStocks>{ 0, 1, 2, 3 });
+    for (size_t row = 0; row < none.count; ++row) { CHECK_FALSE(none.HeaderAbove(row)); }
+
+    const ListRows all = BuildListRows(FourTickers(true, true, true, true));
+    CHECK(all.monitorCount == 4);
+    CHECK(all.HeaderAbove(0));
+    for (size_t row = 1; row < all.count; ++row) { CHECK_FALSE(all.HeaderAbove(row)); }
+
+    const ListRows empty = BuildListRows(Config{});
+    CHECK(empty.count == 0);
+}
+
+TEST_CASE("NeighbourInGroup steps over the other group and stops at the group's ends") {
+    const Config cfg = FourTickers(true, false, true, false);
+    CHECK(NeighbourInGroup(cfg, 0, +1) == 2);   // over B
+    CHECK(NeighbourInGroup(cfg, 2, -1) == 0);
+    CHECK(NeighbourInGroup(cfg, 1, +1) == 3);   // over C
+    // Each is at an end of its group, although the array goes on in that direction.
+    CHECK(NeighbourInGroup(cfg, 2, +1) == cfg.stockCount);
+    CHECK(NeighbourInGroup(cfg, 1, -1) == cfg.stockCount);
+    CHECK(NeighbourInGroup(cfg, 0, -1) == cfg.stockCount);
+    CHECK(NeighbourInGroup(cfg, 3, +1) == cfg.stockCount);
+}
+
+TEST_CASE("[monitor] loads, writes and is shared across lists") {
+    TempIni ini;
+    ini.Write("[stocks]\r\nRY.TO=Royal\r\nDOL.TO=Dollarama\r\n"
+              "[stocks.Banks]\r\nRY.TO=Royal\r\n"
+              "[monitor]\r\nry.to=1\r\n");   // keys are case-insensitive, as everywhere in the INI
+    Config cfg;
+    std::wstring err;
+    REQUIRE(LoadConfig(ini.path, L"", cfg, err));
+    REQUIRE(cfg.stockCount == 2);
+    CHECK(cfg.stocks[0].monitored);
+    CHECK_FALSE(cfg.stocks[1].monitored);
+
+    Config banks;
+    REQUIRE(LoadConfig(ini.path, L"Banks", banks, err));
+    CHECK(banks.stocks[0].monitored);
+
+    REQUIRE(WriteMonitored(ini.path, L"DOL.TO", true, err));
+    CHECK(ReadMonitored(ini.path, L"DOL.TO"));
+    REQUIRE(WriteMonitored(ini.path, L"DOL.TO", false, err));
+    CHECK_FALSE(ReadMonitored(ini.path, L"DOL.TO"));
+}
+
+TEST_CASE("Removing a ticker clears [monitor] only when no other list has it") {
+    TempIni ini;
+    ini.Write("[stocks]\r\nRY.TO=Royal\r\nDOL.TO=Dollarama\r\n"
+              "[stocks.Banks]\r\nRY.TO=Royal\r\n"
+              "[monitor]\r\nRY.TO=1\r\nDOL.TO=1\r\n");
+    Config cfg;
+    std::wstring err;
+    REQUIRE(LoadConfig(ini.path, L"", cfg, err));
+    REQUIRE(DeleteStockEntry(cfg, L"RY.TO", err));
+    CHECK(ReadMonitored(ini.path, L"RY.TO"));       // still in Banks
+    REQUIRE(DeleteStockEntry(cfg, L"DOL.TO", err));
+    CHECK_FALSE(ReadMonitored(ini.path, L"DOL.TO"));
+}
+
+TEST_CASE("A new ticker with monitored unset does not clear another list's flag") {
+    TempIni ini;
+    ini.Write("[stocks]\r\nDOL.TO=Dollarama\r\n[stocks.Banks]\r\n; x\r\n[monitor]\r\nRY.TO=1\r\n");
+    Config banks;
+    std::wstring err;
+    REQUIRE(LoadConfig(ini.path, L"Banks", banks, err));
+    StockEntry e;
+    e.symbol = L"RY.TO";
+    e.name = L"Royal";
+    REQUIRE(WriteStockEntry(banks, e, err));
+    CHECK(ReadMonitored(ini.path, L"RY.TO"));
+}
+
 TEST_CASE("LoadConfig reads settings, stocks, holdings and alerts") {
     TempIni ini;
     ini.Write(kIni);

@@ -15,6 +15,7 @@ struct StockEntry {
     Alert        alert;
     std::array<Transaction, kMaxTxPerSymbol> tx{};
     size_t       txCount = 0;
+    bool         monitored = false;   // in the Monitor group rather than Watching
 };
 
 enum class ThemeMode { System, Light, Dark };
@@ -54,6 +55,27 @@ struct Config {
     double       cash = 0.0;                 // uninvested cash in the active list, in portfolioCurrency
     std::wstring path;
 };
+
+// How the active list is laid out on screen: the Monitor group first, then
+// Watching, each in file order. Everything per-ticker stays indexed by position
+// in Config::stocks, so a change of group never has to move fetched data.
+struct ListRows {
+    std::array<size_t, kMaxStocks> stockAt{};   // row -> index into Config::stocks
+    std::array<size_t, kMaxStocks> rowOf{};     // index into Config::stocks -> row
+    size_t count = 0;
+    size_t monitorCount = 0;                    // the first monitorCount rows are the Monitor group
+
+    // Group headings appear only once something is monitored, so a list that
+    // does not use the groups looks as it always did.
+    bool HeaderAbove(size_t row) const { return monitorCount > 0 && (row == 0 || row == monitorCount); }
+    bool IsMonitorRow(size_t row) const { return row < monitorCount; }
+};
+
+ListRows BuildListRows(const Config& cfg);
+
+// The ticker `delta` (+1 or -1) places away within the same group, in file
+// order. Returns cfg.stockCount when `stock` is already at that end of its group.
+size_t NeighbourInGroup(const Config& cfg, size_t stock, int delta);
 
 // Window/view state the app writes back to [state] on exit.
 struct ViewState {
@@ -129,6 +151,11 @@ bool WriteCash(const std::wstring& path, const std::wstring& list, double amount
 double ReadCash(const std::wstring& path, const std::wstring& list);
 bool WriteAlert(const std::wstring& path, const std::wstring& symbol, const Alert& a, std::wstring& err);
 bool WriteCurrency(const std::wstring& path, const std::wstring& symbol, const std::wstring& code, std::wstring& err);
+
+// [monitor] SYMBOL=1: the ticker is in the Monitor group, in every list that
+// has it. Not monitored removes the line.
+bool WriteMonitored(const std::wstring& path, const std::wstring& symbol, bool monitored, std::wstring& err);
+bool ReadMonitored(const std::wstring& path, const std::wstring& symbol);
 
 // Every symbol of every watch list in the file (for the broker import's
 // symbol mapping). Returns how many were written to `out`.

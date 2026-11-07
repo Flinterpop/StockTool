@@ -55,6 +55,7 @@ BEGIN
         MENUITEM "&Remove",                IDM_REMOVE
         MENUITEM "Move &up\tCtrl+Up",      IDM_MOVEUP
         MENUITEM "Move &down\tCtrl+Down",  IDM_MOVEDOWN
+        MENUITEM "&Monitor closely\tCtrl+M", IDM_MONITOR
         MENUITEM SEPARATOR
         MENUITEM "&Holding...",            IDM_HOLDING
         MENUITEM "&Transactions...",       IDM_TRANSACTIONS

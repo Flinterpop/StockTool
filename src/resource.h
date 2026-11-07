@@ -74,6 +74,7 @@
 #define IDM_ALERTS        1035
 #define IDM_EDIT          1036
 #define IDM_TRANSACTIONS  1037
+#define IDM_MONITOR       1038
 #define IDM_ABOUT         1040
 #define IDM_HELP          1041
 #define IDM_HEALTH        1042
