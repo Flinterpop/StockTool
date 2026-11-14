@@ -99,6 +99,11 @@ void WeeklyWindow::SetTheme(const Theme& theme) {
     if (hwnd_ != nullptr) { ApplyTheme(); }
 }
 
+void WeeklyWindow::Close() {
+    if (hwnd_ != nullptr) { DestroyWindow(hwnd_); }
+    assert(hwnd_ == nullptr);
+}
+
 // ---------------------------------------------------------------------------
 // Creation and layout
 
@@ -481,6 +486,11 @@ LRESULT WeeklyWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_DPICHANGED:    OnDpiChanged(wp, lp); return 0;
+    case WM_DESTROY: {
+        const HWND owner = GetWindow(hwnd_, GW_OWNER);
+        if (owner != nullptr) { PostMessageW(owner, WM_APP_WEEKLY_CLOSED, 0, 0); }
+        return 0;
+    }
     case WM_NCDESTROY: {
         FreeBuffers();
         SetWindowLongPtrW(hwnd_, GWLP_USERDATA, 0);

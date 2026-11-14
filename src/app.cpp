@@ -413,6 +413,7 @@ LRESULT App::Handle(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_APP_NEWS_READY:    OnNewsReady(static_cast<size_t>(wp)); return 0;
     case WM_APP_BENCH_READY:   OnBenchReady(static_cast<size_t>(lp)); return 0;
     case WM_APP_BACKOFF:       OnBackoff(static_cast<size_t>(wp)); return 0;
+    case WM_APP_WEEKLY_CLOSED: SyncViewMenu(); return 0;
     default: break;
     }
     return DefWindowProcW(hwnd_, msg, wp, lp);
@@ -495,7 +496,7 @@ void App::CreateFonts() {
                            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                            DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
     assert(hUiFont_ != nullptr);
-    const HWND controls[] = { hList_, hTabs_, hRefreshBtn_, hAddBtn_, hRemoveBtn_, hReloadBtn_ };
+    const HWND controls[] = { hList_, hTabs_, hRefreshBtn_, hWeeklyBtn_, hAddBtn_, hRemoveBtn_, hReloadBtn_ };
     for (HWND h : controls) {
         if (h != nullptr) { SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(hUiFont_), TRUE); }
     }
@@ -543,6 +544,7 @@ void App::CreateControls() {
         hToolBtns_[i] = button(kTools[i].label, WS_GROUP | BS_AUTOCHECKBOX | BS_PUSHLIKE, kTools[i].id);
     }
     hRefreshBtn_ = button(L"Refresh (F5)", WS_GROUP | BS_PUSHBUTTON, IDC_REFRESH);
+    hWeeklyBtn_  = button(L"Weekly 3D", WS_GROUP | BS_AUTOCHECKBOX | BS_PUSHLIKE, IDM_WEEKLY);
     hAddBtn_     = button(L"Add…", WS_GROUP | BS_PUSHBUTTON, IDC_ADD);
     hRemoveBtn_  = button(L"Remove", BS_PUSHBUTTON, IDC_REMOVE);
     hReloadBtn_  = button(L"Reload cfg", BS_PUSHBUTTON, IDC_RELOAD);
@@ -568,6 +570,8 @@ void App::CreateToolTips() {
     }
     AddTip(hRefreshBtn_, L"Re-fetch every ticker now (F5)\r\n"
                          L"Prices also refresh on a timer; the status line says when.");
+    AddTip(hWeeklyBtn_,  L"Weekly 3D window (open or close)\r\n"
+                         L"The selected ticker's weeks side by side, to spot what repeats every week.");
     AddTip(hAddBtn_,     L"Add a ticker to this list (Ctrl+N)\r\n"
                          L"Search by company name or type a symbol. The dialog stays open for several.");
     AddTip(hRemoveBtn_,  L"Remove the selected ticker from this list\r\n"
@@ -739,6 +743,7 @@ void App::Layout() {
         x += Px(kRangeBtnW) + Px(kBtnGap);
     }
     MoveWindow(hRefreshBtn_, rightR - Px(kWideBtnW + 16), btnY, Px(kWideBtnW + 16), btnH, TRUE);
+    MoveWindow(hWeeklyBtn_, rightR - Px(kWideBtnW + 16) - Px(kBtnGap) - Px(kWideBtnW), btnY, Px(kWideBtnW), btnH, TRUE);
 
     statusRect_ = { rightX, h - m - Px(kStatusH), rightR, h - m };
     statsRect_  = { rightX, statusRect_.top - Px(kStatsH), rightR, statusRect_.top };
@@ -765,7 +770,7 @@ void App::ApplyTheme() {
     (void)hr;  // pre-20H1 builds ignore the attribute; the client area is still themed
 
     const wchar_t* sub = dark ? L"DarkMode_Explorer" : L"Explorer";
-    const HWND controls[] = { hList_, hTabs_, hRefreshBtn_, hAddBtn_, hRemoveBtn_, hReloadBtn_ };
+    const HWND controls[] = { hList_, hTabs_, hRefreshBtn_, hWeeklyBtn_, hAddBtn_, hRemoveBtn_, hReloadBtn_ };
     for (HWND h : controls) {
         if (h != nullptr) { SetWindowTheme(h, sub, nullptr); }
     }
@@ -822,6 +827,9 @@ void App::SyncViewMenu() {
             EnableWindow(hToolBtns_[i], off ? FALSE : TRUE);
         }
     }
+    const bool weeklyOpen = weekly_ && weekly_->IsOpen();
+    check(IDM_WEEKLY, weeklyOpen);
+    if (hWeeklyBtn_ != nullptr) { SendMessageW(hWeeklyBtn_, BM_SETCHECK, weeklyOpen ? BST_CHECKED : BST_UNCHECKED, 0); }
     DrawMenuBar(hwnd_);
 }
 
@@ -2260,11 +2268,17 @@ std::wstring App::HealthText() {
     return out;
 }
 
-// View > Weekly 3D: the selected ticker's weeks in their own window, which
-// then follows the selection.
+// View > Weekly 3D (menu or toolbar toggle): opens the selected ticker's weeks
+// in their own window, which then follows the selection; closes it if open.
 void App::OnShowWeekly() {
-    if (!HasStocks() || !weekly_) { SetStatus(L"Add a ticker first"); return; }
-    weekly_->Show(hwnd_, cfg_.stocks[selected_].symbol, cfg_.stocks[selected_].name, *theme_);
+    if (weekly_ && weekly_->IsOpen()) {
+        weekly_->Close();
+    } else if (!HasStocks() || !weekly_) {
+        SetStatus(L"Add a ticker first");
+    } else {
+        weekly_->Show(hwnd_, cfg_.stocks[selected_].symbol, cfg_.stocks[selected_].name, *theme_);
+    }
+    SyncViewMenu();
 }
 
 void App::OnShowHealth() {

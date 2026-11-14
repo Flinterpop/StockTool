@@ -215,6 +215,7 @@ private:
     std::array<HWND, kRanges.size()> hRangeBtns_{};
     std::array<HWND, kToolCount> hToolBtns_{};
     HWND      hRefreshBtn_ = nullptr;
+    HWND      hWeeklyBtn_  = nullptr;   // toggles the Weekly 3D window
     HWND      hAddBtn_     = nullptr;
     HWND      hRemoveBtn_  = nullptr;
     HWND      hReloadBtn_  = nullptr;

@@ -13,6 +13,9 @@
 
 namespace st {
 
+// Posted to the owner when the weekly window closes (so its toggle can uncheck).
+constexpr UINT WM_APP_WEEKLY_CLOSED = WM_APP + 11;
+
 class WeeklyWindow {
 public:
     WeeklyWindow(HINSTANCE inst, Fetcher& fetcher);
@@ -25,6 +28,7 @@ public:
     // Follows the main window's selection; ignored while closed.
     void SetSymbol(const std::wstring& symbol, const std::wstring& name);
     void SetTheme(const Theme& theme);
+    void Close();
     bool IsOpen() const { return hwnd_ != nullptr; }
     HWND Handle() const { return hwnd_; }
 
