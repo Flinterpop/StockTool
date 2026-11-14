@@ -2,7 +2,7 @@
 
 [![Release][release-badge]][release-latest]
 
-[release-badge]: https://img.shields.io/badge/release-v0.8.0-blue
+[release-badge]: https://img.shields.io/badge/release-v0.9.0-blue
 [release-latest]: https://github.com/Flinterpop/StockTool/releases/latest
 
 *Last updated: 13 Nov 2026*
@@ -83,7 +83,7 @@ cmake --preset default
 cmake --build --preset release      # or: --preset debug
 build\Release\StockTool.exe
 build\Release\stocktool_tests.exe   # Catch2 unit tests
-ISCC.exe /DAppVersion=0.8.0 installer\StockTool.iss   # -> installer\Output\StockTool-0.8.0-setup.exe
+ISCC.exe /DAppVersion=0.9.0 installer\StockTool.iss   # -> installer\Output\StockTool-0.9.0-setup.exe
 ```
 
 The build uses `/W4 /WX /permissive-` and the static CRT (vcpkg `x64-windows-static`), so the exe has no VC++ redistributable dependency. The first build seeds `stocktool.cfg` next to the exe; later builds leave it alone, because the app writes holdings, alerts and window state back into it. The UI-free parts (config, parsers, indicators, formatting, chart geometry, themes) are a static library (`stocktool_core`) shared by the app and the tests.
