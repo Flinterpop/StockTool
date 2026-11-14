@@ -2,6 +2,7 @@
 
 #include "quote_parser.h"
 #include "textfmt.h"
+#include "weekly.h"
 
 #include <nlohmann/json.hpp>
 
@@ -53,6 +54,7 @@ bool Fetcher::Start(HWND notify, const Config& cfg, std::wstring& err) {
     search_    = std::make_unique<std::array<SearchHit, kMaxSearchHits>>();
     news_      = std::make_unique<std::array<NewsSlot, kMaxStocks>>();
     bench_     = std::make_unique<QuoteData>();
+    weekly_    = std::make_unique<QuoteData>();
     stop_      = false;
     static constexpr const wchar_t* kNames[kEndpointCount] = { L"chart", L"fundamentals", L"search", L"fx", L"news", L"crumb", L"tmx-fallback" };
     for (size_t i = 0; i < kEndpointCount; ++i) { health_.endpoints[i].name = kNames[i]; }
@@ -100,6 +102,7 @@ void Fetcher::Run() {
         case JobKind::Fx:     ProcessFx(job); break;
         case JobKind::News:   ProcessNews(job); break;
         case JobKind::Bench:  ProcessBench(job); break;
+        case JobKind::Weekly: ProcessWeekly(job); break;
         default:              Process(job); break;
         }
     }
@@ -249,6 +252,23 @@ bool Fetcher::EnqueueBench(size_t range) {
     return Push(job, false);
 }
 
+bool Fetcher::EnqueueWeekly(const std::wstring& symbol, size_t range, HWND notify) {
+    assert(thread_ != nullptr);
+    assert(range < kWeeklyRanges.size() && notify != nullptr);
+    if (symbol.empty() || range >= kWeeklyRanges.size() || notify == nullptr) { return false; }
+    FetchJob job;
+    job.kind   = JobKind::Weekly;
+    job.range  = range;
+    job.symbol = symbol;
+    job.aux    = symbol;   // so requests for different symbols are not coalesced
+    job.notify = notify;
+    job.url    = BuildUrl(symbol, kWeeklyRanges[range]);
+    job.spec   = &kWeeklyRanges[range];
+    // TMX's series query is daily at best, so it cannot stand in for hourly bars.
+    if (cfg_.fallback == FallbackProvider::Tmx && !kWeeklyRanges[range].intraday) { job.fallback = cfg_.tmxUrl; }
+    return Push(job, true);   // the user is looking at it
+}
+
 std::wstring Fetcher::BuildUrl(const std::wstring& symbol, const RangeSpec& spec) const {
     assert(!symbol.empty());
     std::wstring url = cfg_.urlTemplate;
@@ -311,6 +331,7 @@ std::string TmxBody(const std::wstring& symbol, const RangeSpec& spec) {
     else if (r == L"6mo") { days = 190; }
     else if (r == L"ytd") { days = -1; }
     else if (r == L"1y")  { days = 370; }
+    else if (r == L"2y")  { days = 2 * 366 + 5; }
     else if (r == L"5y")  { days = 5 * 366; freq = "week"; }
     else if (r == L"max") { days = 40 * 366; freq = "month"; }
     const int64_t now = static_cast<int64_t>(_time64(nullptr));
@@ -624,6 +645,22 @@ void Fetcher::ProcessBench(const FetchJob& job) {
     (void)posted;
 }
 
+void Fetcher::ProcessWeekly(const FetchJob& job) {
+    assert(job.kind == JobKind::Weekly && !job.url.empty() && job.notify != nullptr);
+    const bool ok = Fetch(job, *scratch_);
+    (void)ok;   // failure is reported through QuoteData::error
+    scratch_->symbol = job.symbol;
+    {
+        std::lock_guard<std::mutex> lock(dataMutex_);
+        *weekly_     = *scratch_;
+        weeklyRange_ = job.range;
+        weeklyValid_ = true;
+    }
+    // The window may have closed while the request was in flight; then nobody is waiting.
+    const BOOL posted = PostMessageW(job.notify, WM_APP_WEEKLY_READY, 0, static_cast<LPARAM>(job.range));
+    (void)posted;
+}
+
 // A GET that honours the provider's rate limiting and keeps the health
 // table current. HTTP 429 starts a pause that doubles on repeats (1, 2, 4,
 // 8 minutes, capped) and clears on the next success.
@@ -686,6 +723,14 @@ bool Fetcher::CopyBench(size_t range, QuoteData& out) {
     std::lock_guard<std::mutex> lock(dataMutex_);
     if (!benchValid_ || benchRange_ != range) { return false; }
     out = *bench_;
+    return true;
+}
+
+bool Fetcher::CopyWeekly(const std::wstring& symbol, size_t range, QuoteData& out) {
+    if (!weekly_) { return false; }
+    std::lock_guard<std::mutex> lock(dataMutex_);
+    if (!weeklyValid_ || weeklyRange_ != range || weekly_->symbol != symbol) { return false; }
+    out = *weekly_;
     return true;
 }
 

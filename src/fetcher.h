@@ -13,7 +13,7 @@
 
 namespace st {
 
-enum class JobKind : uint8_t { Summary, Chart, Inset, Quote, Search, Fx, News, Bench };
+enum class JobKind : uint8_t { Summary, Chart, Inset, Quote, Search, Fx, News, Bench, Weekly };
 
 // Endpoint slots for the health panel.
 enum class Endpoint : uint8_t { Chart, Quote, Search, Fx, News, Crumb, Tmx };
@@ -27,7 +27,7 @@ struct FetchJob {
     std::wstring aux;          // Fx: "FROM|TO"
     std::wstring fallback;     // chart jobs: TMX endpoint to try when the primary fails ("" = none)
     const RangeSpec* spec = nullptr;   // chart jobs: what was asked for (drives the fallback request)
-    HWND         notify = nullptr;  // Search only: window that receives the result
+    HWND         notify = nullptr;  // Search/Weekly: window that receives the result
 };
 
 // Posted to the notify window when a job completes.
@@ -40,6 +40,7 @@ constexpr UINT WM_APP_FX_READY      = WM_APP + 6;  // an FX rate arrived (see Co
 constexpr UINT WM_APP_NEWS_READY    = WM_APP + 7;  // wParam = stock
 constexpr UINT WM_APP_BENCH_READY   = WM_APP + 8;  // lParam = range
 constexpr UINT WM_APP_BACKOFF       = WM_APP + 9;  // wParam = seconds the provider asked us to wait
+constexpr UINT WM_APP_WEEKLY_READY  = WM_APP + 10; // posted to the weekly job's notify window; lParam = range
 
 class Fetcher {
 public:
@@ -78,6 +79,12 @@ public:
     // Queues the benchmark index (cfg.benchmark) at `range`. False when unset.
     bool EnqueueBench(size_t range);
 
+    // Queues `symbol` at kWeeklyRanges[range] for the weekly window; the
+    // result goes to `notify` as WM_APP_WEEKLY_READY. One slot: a newer
+    // request replaces an older result. TMX backs up only the daily rows.
+    bool EnqueueWeekly(const std::wstring& symbol, size_t range, HWND notify);
+    bool CopyWeekly(const std::wstring& symbol, size_t range, QuoteData& out);
+
     // Copy the latest result for the UI thread. False if none / stale. The
     // caller must compare QuoteData::symbol with what it expects at `stock`.
     bool CopySummary(size_t stock, QuoteData& out);
@@ -110,6 +117,7 @@ private:
     void ProcessFx(const FetchJob& job);
     void ProcessNews(const FetchJob& job);
     void ProcessBench(const FetchJob& job);
+    void ProcessWeekly(const FetchJob& job);
     bool Get(Endpoint ep, const std::wstring& url, HttpResult& res, std::wstring& err);   // http_.Get + health/backoff
     bool InBackoff(std::wstring& why);
     void Record(Endpoint ep, bool ok, const HttpResult& res, const std::wstring& err);
@@ -164,6 +172,9 @@ private:
     std::unique_ptr<QuoteData> bench_;
     size_t benchRange_ = 0;
     bool   benchValid_ = false;
+    std::unique_ptr<QuoteData> weekly_;
+    size_t weeklyRange_ = 0;
+    bool   weeklyValid_ = false;
 
     Health   health_;            // guarded by dataMutex_
     unsigned backoffSteps_ = 0;  // doubles the pause on repeated 429s

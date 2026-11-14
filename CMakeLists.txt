@@ -40,6 +40,7 @@ add_library(stocktool_core STATIC
     src/quote_parser.cpp
     src/textfmt.cpp
     src/theme.cpp
+    src/weekly.cpp
 )
 target_include_directories(stocktool_core PUBLIC src)
 target_compile_definitions(stocktool_core PUBLIC ${ST_DEFINES})
@@ -53,6 +54,7 @@ add_executable(StockTool WIN32
     src/dialogs.cpp
     src/fetcher.cpp
     src/help.cpp
+    src/weeklywnd.cpp
     src/StockTool.rc
 )
 target_compile_options(StockTool PRIVATE ${ST_OPTIONS})
@@ -83,6 +85,7 @@ if(Catch2_FOUND)
         tests/test_position.cpp
         tests/test_quote_parser.cpp
         tests/test_textfmt.cpp
+    tests/test_weekly.cpp
     )
     target_compile_options(stocktool_tests PRIVATE ${ST_OPTIONS})
     target_link_libraries(stocktool_tests PRIVATE stocktool_core Catch2::Catch2WithMain)

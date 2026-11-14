@@ -39,6 +39,7 @@ BEGIN
         MENUITEM "&News pane",             IDM_NEWS
         MENUITEM "&Benchmark index",       IDM_BENCHMARK
         MENUITEM "&Portfolio history",     IDM_PORTFOLIO
+        MENUITEM "&Weekly 3D...",          IDM_WEEKLY
         MENUITEM SEPARATOR
         POPUP "&Theme"
         BEGIN

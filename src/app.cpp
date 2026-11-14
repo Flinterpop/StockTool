@@ -6,6 +6,7 @@
 #include "help.h"
 #include "resource.h"
 #include "textfmt.h"
+#include "weeklywnd.h"
 
 #include <commctrl.h>
 #include <commdlg.h>
@@ -336,7 +337,9 @@ int App::Run() {
         const BOOL r = GetMessageW(&msg, nullptr, 0, 0);
         if (r == 0)  { break; }
         if (r == -1) { return 1; }
-        if (hAccel_ != nullptr && TranslateAcceleratorW(hwnd_, hAccel_, &msg) != 0) { continue; }
+        // Main-window shortcuts only for the main window: F5 or Ctrl+1 in the weekly window is its own.
+        const bool ours = msg.hwnd == hwnd_ || IsChild(hwnd_, msg.hwnd) != FALSE;
+        if (ours && hAccel_ != nullptr && TranslateAcceleratorW(hwnd_, hAccel_, &msg) != 0) { continue; }
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
@@ -447,6 +450,7 @@ void App::OnCreate() {
         SetStatus(err);
         return;
     }
+    weekly_ = std::make_unique<WeeklyWindow>(hInst_, fetcher_);
     RequestAllSummaries();
     RequestQuotes();
     if (HasStocks()) {
@@ -773,6 +777,7 @@ void App::ApplyTheme() {
     }
     chartDirty_ = true;
     RedrawWindow(hwnd_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+    if (weekly_) { weekly_->SetTheme(*theme_); }
 }
 
 void App::SetThemeMode(ThemeMode mode) {
@@ -912,6 +917,7 @@ void App::SelectStock(size_t index) {
     RequestChart(!chartValid_[index]);
     RequestInset(!insetValid_[index]);
     RequestNews(!(*news_)[index].valid);
+    if (weekly_) { weekly_->SetSymbol(cfg_.stocks[index].symbol, cfg_.stocks[index].name); }
     RedrawAll();
 }
 
@@ -1761,6 +1767,7 @@ void App::OnCommand(int id, UINT code) {
     case IDM_PORTFOLIO: ToggleOption(state_.portfolio); RequestBench(); break;
     case IDM_TRANSACTIONS: OnEditTransactions(); break;
     case IDM_HEALTH:    OnShowHealth(); break;
+    case IDM_WEEKLY:    OnShowWeekly(); break;
     case IDM_THEME_SYSTEM: SetThemeMode(ThemeMode::System); break;
     case IDM_THEME_LIGHT:  SetThemeMode(ThemeMode::Light); break;
     case IDM_THEME_DARK:   SetThemeMode(ThemeMode::Dark); break;
@@ -2251,6 +2258,13 @@ std::wstring App::HealthText() {
     out += L"Config: " + cfg_.path + L"\r\n";
     out += L"\r\nRefreshes every 2 s. Esc closes.\r\n";
     return out;
+}
+
+// View > Weekly 3D: the selected ticker's weeks in their own window, which
+// then follows the selection.
+void App::OnShowWeekly() {
+    if (!HasStocks() || !weekly_) { SetStatus(L"Add a ticker first"); return; }
+    weekly_->Show(hwnd_, cfg_.stocks[selected_].symbol, cfg_.stocks[selected_].name, *theme_);
 }
 
 void App::OnShowHealth() {

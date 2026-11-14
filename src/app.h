@@ -7,6 +7,7 @@
 #include "fetcher.h"
 #include "position.h"
 #include "theme.h"
+#include "weeklywnd.h"
 
 #include <shellapi.h>
 
@@ -108,6 +109,7 @@ private:
     void OnEditTransactions();
     void OnEditAlerts();
     void OnShowHealth();
+    void OnShowWeekly();
     void OnReloadConfig();
     // How many optional lines the portfolio strip needs (income, realised, cash),
     // so the layout and the painter always agree on its height.
@@ -247,6 +249,7 @@ private:
     ViewState    state_;
     const Theme* theme_ = nullptr;
     Fetcher      fetcher_;
+    std::unique_ptr<WeeklyWindow> weekly_;   // View > Weekly 3D (after fetcher_: destroyed first)
 
     // data copied from the fetcher (UI thread owned)
     std::unique_ptr<std::array<QuoteData, kMaxStocks>>  summaries_;
