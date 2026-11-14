@@ -77,7 +77,7 @@ private:
     std::wstring title_;
     std::wstring message_;
     size_t    range_  = kWeeklyDefaultRange;
-    WeekStyle style_  = WeekStyle::Waterfall;
+    WeekStyle style_  = WeekStyle::Week2D;
     WeekValue mode_   = WeekValue::Price;
     WeekView  view_;
     size_t    weeksAgo_ = 0;   // Week2D: which week (0 = the newest)
