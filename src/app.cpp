@@ -532,6 +532,9 @@ void App::CreateControls() {
                              0, 0, 10, 10, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_LIST)),
                              hInst_, nullptr);
     assert(hList_ != nullptr);
+    const BOOL subclassed = SetWindowSubclass(hList_, ListSubclassProc, 1, reinterpret_cast<DWORD_PTR>(this));
+    assert(subclassed != FALSE);
+    (void)subclassed;
     RebuildList();
     RebuildTabs();
 
@@ -582,7 +585,8 @@ void App::CreateToolTips() {
                          L"Click a tab to switch. The List menu creates, renames and deletes lists.");
     AddTip(hList_,       L"Watch list\r\n"
                          L"Click to select a ticker, double-click (or F2) to edit it, "
-                         L"right-click for the Ticker menu. Ctrl+M moves it between Monitor and Watching.");
+                         L"right-click for the Ticker menu. Ctrl+M moves it between Monitor and Watching.\r\n"
+                         L"Drag a ticker onto another list's tab to move it to that list.");
     AddAreaTip(kTipPortfolio, portfolioRect_);
     AddAreaTip(kTipHeader, headerRect_);
 }
@@ -685,7 +689,37 @@ void App::RebuildListMenu() {
     const bool named = !cfg_.listName.empty();
     EnableMenuItem(menu, IDM_LIST_RENAME, MF_BYCOMMAND | (named ? MF_ENABLED : MF_GRAYED));
     EnableMenuItem(menu, IDM_LIST_DELETE, MF_BYCOMMAND | (named ? MF_ENABLED : MF_GRAYED));
+    RebuildMoveToMenu();
     DrawMenuBar(hwnd_);
+}
+
+// Ticker > Move to list: one item per other list, ids IDM_MOVETO_BASE + list index.
+void App::RebuildMoveToMenu() {
+    HMENU ticker = GetSubMenu(hMenu_, 2);
+    assert(ticker != nullptr);
+    if (ticker == nullptr) { return; }
+    HMENU moveTo = nullptr;
+    const int items = GetMenuItemCount(ticker);
+    for (int i = 0; i < items && i < 64; ++i) {
+        HMENU sub = GetSubMenu(ticker, i);
+        if (sub != nullptr) { moveTo = sub; break; }   // the Ticker menu's only submenu
+    }
+    assert(moveTo != nullptr);
+    if (moveTo == nullptr) { return; }
+    for (int guard = 0; guard < static_cast<int>(kMaxLists) + 1; ++guard) {
+        if (GetMenuItemCount(moveTo) <= 0) { break; }
+        DeleteMenu(moveTo, 0, MF_BYPOSITION);
+    }
+    size_t added = 0;
+    for (size_t i = 0; i < cfg_.listCount; ++i) {
+        if (SameSymbol(cfg_.lists[i], cfg_.listName)) { continue; }
+        const std::wstring label = cfg_.lists[i].empty() ? L"Watch list" : cfg_.lists[i];
+        AppendMenuW(moveTo, MF_STRING, IDM_MOVETO_BASE + static_cast<UINT>(i), label.c_str());
+        ++added;
+    }
+    if (added == 0) {
+        AppendMenuW(moveTo, MF_STRING | MF_GRAYED, IDM_MOVETO_BASE, L"(no other lists)");
+    }
 }
 
 void App::Layout() {
@@ -809,6 +843,7 @@ void App::SyncViewMenu() {
     check(IDM_NEWS,      state_.news);
     check(IDM_BENCHMARK, state_.benchmark);
     check(IDM_PORTFOLIO, state_.portfolio);
+    check(IDM_WEEKBREAKS, state_.weekBreaks);
     EnableMenuItem(hMenu_, IDM_BENCHMARK, MF_BYCOMMAND | (cfg_.benchmark.empty() ? MF_GRAYED : MF_ENABLED));
     check(IDM_MINTRAY,   cfg_.minimizeToTray);
     EnableMenuItem(hMenu_, IDM_NEWS, MF_BYCOMMAND | (fetcher_.NewsEnabled() || hwnd_ == nullptr ? MF_ENABLED : MF_GRAYED));
@@ -932,7 +967,11 @@ void App::SelectStock(size_t index) {
 void App::SelectRange(size_t index) {
     if (index >= kRanges.size()) { return; }
     range_ = index;
-    SendMessageW(hRangeBtns_[index], BM_SETCHECK, BST_CHECKED, 0);
+    // Every button, not just the new one: auto-radio buttons clear their group
+    // only when clicked, so Ctrl+1..8 used to leave the old range pressed too.
+    for (size_t i = 0; i < kRanges.size(); ++i) {
+        SendMessageW(hRangeBtns_[i], BM_SETCHECK, i == index ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
     for (size_t i = 0; i < kMaxStocks; ++i) { chartValid_[i] = false; }
     benchValid_ = false;
     RequestChart(true);
@@ -1290,14 +1329,21 @@ void App::OnRemoveTicker() {
         SetStatus(L"Keep at least one ticker in the default list");
         return;
     }
-    const size_t       index  = selected_;
-    const size_t       row    = rows_.rowOf[index];
-    const std::wstring symbol = cfg_.stocks[index].symbol;
+    const std::wstring symbol = cfg_.stocks[selected_].symbol;
     std::wstring err;
     if (!DeleteStockEntry(cfg_, symbol, err)) {
         SetStatus(err);
         return;
     }
+    DropStockAt(selected_);
+    SetStatus(L"Removed " + symbol);
+}
+
+// The file no longer lists cfg_.stocks[index]: drop it and its caches, then
+// select whatever now sits where its row was.
+void App::DropStockAt(size_t index) {
+    assert(index < cfg_.stockCount);
+    const size_t row = rows_.rowOf[index];
     // Shift the tail down by one (bounded by kMaxStocks).
     for (size_t i = index; i + 1 < cfg_.stockCount && i + 1 < kMaxStocks; ++i) {
         cfg_.stocks[i]     = cfg_.stocks[i + 1];
@@ -1325,7 +1371,28 @@ void App::OnRemoveTicker() {
     if (HasStocks()) { SelectStock(rows_.stockAt[min(row, cfg_.stockCount - 1)]); }
     Layout();
     RedrawAll();
-    SetStatus(L"Removed " + symbol);
+}
+
+void App::MoveTickerToList(size_t stock, size_t listIndex) {
+    if (!HasStocks() || stock >= cfg_.stockCount || listIndex >= cfg_.listCount) { return; }
+    const std::wstring to = cfg_.lists[listIndex];
+    if (SameSymbol(to, cfg_.listName)) { return; }
+    if (cfg_.stockCount <= 1 && cfg_.listName.empty()) {
+        SetStatus(L"Keep at least one ticker in the default list");
+        return;
+    }
+    const std::wstring symbol = cfg_.stocks[stock].symbol;
+    const std::wstring label  = to.empty() ? std::wstring(L"Watch list") : to;
+    std::wstring err;
+    const MoveResult result = MoveStockToList(cfg_, symbol, to, err);
+    if (result == MoveResult::Failed) {
+        SetStatus(err);
+        return;
+    }
+    DropStockAt(stock);
+    SetStatus(result == MoveResult::AlreadyThere
+                  ? symbol + L" was already in " + label + L"; removed it from this list"
+                  : L"Moved " + symbol + L" to " + label);
 }
 
 void App::OnMoveTicker(int delta) {
@@ -1762,6 +1829,10 @@ void App::OnCommand(int id, UINT code) {
         if (i < cfg_.listCount) { SwitchList(cfg_.lists[i]); }
         return;
     }
+    if (id >= IDM_MOVETO_BASE && id < IDM_MOVETO_BASE + static_cast<int>(kMaxLists)) {
+        MoveTickerToList(selected_, static_cast<size_t>(id - IDM_MOVETO_BASE));
+        return;
+    }
     switch (id) {
     case IDM_CANDLES:   ToggleOption(state_.candles); break;
     case IDM_COMPARE:   ToggleOption(state_.compare); RequestChart(false); break;
@@ -1770,6 +1841,7 @@ void App::OnCommand(int id, UINT code) {
     case IDM_BOLLINGER: ToggleOption(state_.bollinger); break;
     case IDM_RSI:       ToggleOption(state_.rsi); break;
     case IDM_INSET:     ToggleOption(state_.inset); RequestInset(false); break;
+    case IDM_WEEKBREAKS: ToggleOption(state_.weekBreaks); break;
     case IDM_NEWS:      ToggleOption(state_.news); Layout(); RequestNews(false); RedrawAll(); break;
     case IDM_BENCHMARK: ToggleOption(state_.benchmark); RequestBench(); break;
     case IDM_PORTFOLIO: ToggleOption(state_.portfolio); RequestBench(); break;
@@ -1837,6 +1909,104 @@ void App::OnContextMenu(HWND source, int x, int y) {
     HMENU ticker = GetSubMenu(hMenu_, 2);
     assert(ticker != nullptr);
     TrackPopupMenu(ticker, TPM_RIGHTBUTTON, x, y, 0, hwnd_, nullptr);
+}
+
+// The list box is subclassed only to let a ticker row be dragged onto a list
+// tab; everything else goes to the list box as before.
+LRESULT CALLBACK App::ListSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR ref) {
+    App* self = reinterpret_cast<App*>(ref);
+    assert(self != nullptr);
+    if (msg == WM_NCDESTROY) {
+        RemoveWindowSubclass(hwnd, ListSubclassProc, id);
+        return DefSubclassProc(hwnd, msg, wp, lp);
+    }
+    if (self != nullptr && self->OnListMouse(msg, wp, lp)) { return 0; }
+    return DefSubclassProc(hwnd, msg, wp, lp);
+}
+
+// Press arms a drag; moving past the system drag distance with more than one
+// list starts it. The list box first gets a button-up at the press point, so
+// it finishes an ordinary click on that row and lets go of the mouse; from
+// then on the mouse is ours until the drop, Esc, or a capture change.
+bool App::OnListMouse(UINT msg, WPARAM wp, LPARAM lp) {
+    const int x = GET_X_LPARAM(lp);
+    const int y = GET_Y_LPARAM(lp);
+    switch (msg) {
+    case WM_LBUTTONDOWN:
+        listPressed_ = HasStocks();
+        listPress_   = POINT{ x, y };
+        return false;
+    case WM_MOUSEMOVE: {
+        if (listDragging_) {
+            const int tab = TabAtListPoint(x, y);
+            SetDropTab(tab);
+            SetCursor(LoadCursorW(nullptr, tab >= 0 ? IDC_HAND : IDC_NO));
+            return true;
+        }
+        if (!listPressed_ || (wp & MK_LBUTTON) == 0) { return false; }
+        const bool moved = std::abs(x - listPress_.x) > GetSystemMetrics(SM_CXDRAG) ||
+                         std::abs(y - listPress_.y) > GetSystemMetrics(SM_CYDRAG);
+        if (!moved || cfg_.listCount < 2) { return false; }
+        listPressed_ = false;
+        DefSubclassProc(hList_, WM_LBUTTONUP, 0, MAKELPARAM(listPress_.x, listPress_.y));
+        if (!HasStocks()) { return true; }
+        listDragStock_ = selected_;
+        listDragging_  = true;
+        SetCapture(hList_);
+        SetStatus(L"Drop " + cfg_.stocks[listDragStock_].symbol + L" on a list tab to move it there (Esc cancels)");
+        return true;
+    }
+    case WM_LBUTTONUP:
+        listPressed_ = false;
+        if (!listDragging_) { return false; }
+        EndListDrag(true, x, y);
+        return true;
+    case WM_KEYDOWN:
+        if (listDragging_ && wp == VK_ESCAPE) {
+            EndListDrag(false, 0, 0);
+            return true;
+        }
+        return false;
+    case WM_CAPTURECHANGED:
+        if (listDragging_) { EndListDrag(false, 0, 0); }
+        return false;
+    default:
+        return false;
+    }
+}
+
+// Index into cfg_.lists of the tab under (x, y) in list-client px, or -1 when
+// that is no tab or the active list's own.
+int App::TabAtListPoint(int x, int y) const {
+    if (hTabs_ == nullptr || !IsWindowVisible(hTabs_)) { return -1; }
+    POINT p{ x, y };
+    MapWindowPoints(hList_, hTabs_, &p, 1);
+    TCHITTESTINFO hit{};
+    hit.pt = p;
+    const int tab = TabCtrl_HitTest(hTabs_, &hit);
+    if (tab < 0 || static_cast<size_t>(tab) >= cfg_.listCount) { return -1; }
+    if (SameSymbol(cfg_.lists[static_cast<size_t>(tab)], cfg_.listName)) { return -1; }
+    return tab;
+}
+
+void App::SetDropTab(int tab) {
+    if (tab == dropTab_) { return; }
+    if (dropTab_ >= 0) { TabCtrl_HighlightItem(hTabs_, dropTab_, FALSE); }
+    if (tab >= 0) { TabCtrl_HighlightItem(hTabs_, tab, TRUE); }
+    dropTab_ = tab;
+}
+
+void App::EndListDrag(bool drop, int x, int y) {
+    assert(listDragging_);
+    const int tab = drop ? TabAtListPoint(x, y) : -1;
+    listDragging_ = false;    // first: ReleaseCapture re-enters through WM_CAPTURECHANGED
+    SetDropTab(-1);
+    if (GetCapture() == hList_) { ReleaseCapture(); }
+    if (tab >= 0) {
+        MoveTickerToList(listDragStock_, static_cast<size_t>(tab));
+    } else {
+        SetStatus(drop ? L"Not moved: drop on another list's tab" : L"Move cancelled");
+    }
 }
 
 // Off-hours the prices cannot change, so the timer only refreshes every
@@ -2299,6 +2469,7 @@ ChartInput App::BuildChartInput() {
     in.opts.bollinger = state_.bollinger;
     in.opts.rsi       = state_.rsi;
     in.opts.inset     = state_.inset;
+    in.opts.weekBreaks = state_.weekBreaks;
     in.inset          = (has && insetValid_[selected_]) ? &(*insets_)[selected_] : nullptr;
     in.insetLabel     = kRanges[cfg_.insetRange].label;
     in.insetX         = state_.insetX;

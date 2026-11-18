@@ -38,6 +38,7 @@ BEGIN
         MENUITEM "Trend &inset",           IDM_INSET
         MENUITEM "&News pane",             IDM_NEWS
         MENUITEM "&Benchmark index",       IDM_BENCHMARK
+        MENUITEM "Wee&k separators",       IDM_WEEKBREAKS
         MENUITEM "&Portfolio history",     IDM_PORTFOLIO
         MENUITEM "&Weekly 3D...",          IDM_WEEKLY
         MENUITEM SEPARATOR
@@ -57,6 +58,10 @@ BEGIN
         MENUITEM "Move &up\tCtrl+Up",      IDM_MOVEUP
         MENUITEM "Move &down\tCtrl+Down",  IDM_MOVEDOWN
         MENUITEM "&Monitor closely\tCtrl+M", IDM_MONITOR
+        POPUP "Mo&ve to list"
+        BEGIN
+            MENUITEM "(no other lists)",   IDM_MOVETO_BASE, GRAYED
+        END
         MENUITEM SEPARATOR
         MENUITEM "&Holding...",            IDM_HOLDING
         MENUITEM "&Transactions...",       IDM_TRANSACTIONS

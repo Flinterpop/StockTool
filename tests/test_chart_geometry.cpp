@@ -103,3 +103,29 @@ TEST_CASE("the RSI pane shrinks the price plot, moving the inset's travel range"
     CHECK(with.Y < without.Y);
     CHECK(with.X == Approx(without.X));
 }
+
+TEST_CASE("week breaks fall between Friday and Monday in the exchange's local time") {
+    constexpr int32_t kToronto = -5 * 3600;            // EST
+    constexpr int64_t kFri = 1763130600;               // Fri 14 Nov 2025 09:30 EST (14:30 UTC)
+    constexpr int64_t kDay = 86400;
+    CHECK(WeekBreakBefore(kFri, kFri + 3 * kDay, kToronto));          // Fri -> Mon
+    CHECK_FALSE(WeekBreakBefore(kFri - kDay, kFri, kToronto));        // Thu -> Fri
+    CHECK_FALSE(WeekBreakBefore(kFri - 4 * kDay, kFri, kToronto));    // Mon -> Fri, same week
+    CHECK(WeekBreakBefore(kFri - kDay, kFri + 4 * kDay, kToronto));   // Thu -> Tue (Fri, Mon holidays)
+    CHECK(WeekBreakBefore(kFri, kFri + 10 * kDay, kToronto));         // a whole week missing
+    // Local, not UTC: Sun 23:00 EST is Monday 04:00 UTC but still the old week.
+    constexpr int64_t kSunLate = kFri + 2 * kDay + 13 * 3600 + 30 * 60;
+    CHECK_FALSE(WeekBreakBefore(kFri, kSunLate, kToronto));
+    CHECK(WeekBreakBefore(kSunLate, kSunLate + 2 * 3600, kToronto));  // Mon 01:00 EST
+}
+
+TEST_CASE("week breaks on daily ranges up to a year") {
+    CHECK(ShowWeekBreaks(kRanges[2], 30.0));             // 1M
+    CHECK(ShowWeekBreaks(kRanges[4], 20.0));             // YTD in January
+    CHECK(ShowWeekBreaks(kRanges[4], 300.0));            // YTD later in the year
+    CHECK(ShowWeekBreaks(kRanges[3], 180.0));            // 6M
+    CHECK(ShowWeekBreaks(kRanges[5], 366.0));            // 1Y
+    CHECK_FALSE(ShowWeekBreaks(kRanges[6], 1826.0));     // 5Y: weekly bars
+    CHECK_FALSE(ShowWeekBreaks(kRanges[1], 4.0));        // 5D is intraday
+    CHECK_FALSE(ShowWeekBreaks(kRanges[2], 0.0));        // a single bar
+}

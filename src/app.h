@@ -105,6 +105,8 @@ private:
     void OnRemoveTicker();
     void OnMoveTicker(int delta);
     void OnToggleMonitor();
+    void MoveTickerToList(size_t stock, size_t listIndex);   // Move to list menu, or a drop on a tab
+    void DropStockAt(size_t index);                          // forget one ticker in memory once the file no longer lists it
     void OnEditHolding();
     void OnEditTransactions();
     void OnEditAlerts();
@@ -127,6 +129,15 @@ private:
     void OnDeleteList();
     void RebuildTabs();
     void RebuildListMenu();
+    void RebuildMoveToMenu();   // Ticker > Move to list: every list but the active one
+
+    // dragging a ticker row onto a list tab
+    static LRESULT CALLBACK ListSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
+                                             UINT_PTR id, DWORD_PTR ref);
+    bool OnListMouse(UINT msg, WPARAM wp, LPARAM lp);   // true = handled, not passed on
+    int  TabAtListPoint(int x, int y) const;            // list index under a list-client point, -1 = none
+    void SetDropTab(int tab);
+    void EndListDrag(bool drop, int x, int y);
     void ApplyConfig(const Config& fresh);   // swap in a freshly loaded config
 
     // view commands
@@ -280,6 +291,11 @@ private:
     bool   dragging_ = false;   // inset drag in progress
     float  dragDX_   = 0.0f;    // grab offset from the inset's top-left (px)
     float  dragDY_   = 0.0f;
+    bool   listPressed_  = false;   // left button down on the list, drag not started yet
+    bool   listDragging_ = false;   // a ticker row is being dragged towards the tabs
+    POINT  listPress_{};            // where the button went down (list client px)
+    size_t listDragStock_ = 0;      // index into cfg_.stocks being dragged
+    int    dropTab_ = -1;           // tab highlighted as the drop target
     float  scale_    = 1.0f;
     std::wstring status_;
 };

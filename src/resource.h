@@ -87,8 +87,10 @@
 #define IDM_BENCHMARK     1018
 #define IDM_PORTFOLIO     1019
 #define IDM_WEEKLY        1024
+#define IDM_WEEKBREAKS    1025
 #define IDM_LIST_NEW      1060
 #define IDM_LIST_RENAME   1061
 #define IDM_LIST_DELETE   1062
 #define IDM_LIST_BASE     1080   // + list index: switch list (menu + tabs)
 #define IDM_RANGE_BASE    1100   // + range index: Ctrl+1..8
+#define IDM_MOVETO_BASE   1120   // + list index: Ticker > Move to list

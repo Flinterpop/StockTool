@@ -249,11 +249,16 @@ TEST_CASE("View state round-trips") {
     s.candles   = true;
     s.rsi       = true;
     s.inset     = false;
+    s.weekBreaks = false;
     s.selected  = L"DOL.TO";
     std::wstring err;
+    ViewState fresh;
+    LoadViewState(ini.path, fresh);
+    CHECK(fresh.weekBreaks);                  // on when nothing is saved yet
     REQUIRE(SaveViewState(ini.path, s, err));
     ViewState back;
     LoadViewState(ini.path, back);
+    CHECK_FALSE(back.weekBreaks);
     CHECK(back.hasWindow);
     CHECK(back.window.left == 10);
     CHECK(back.window.right == 810);
@@ -338,6 +343,68 @@ TEST_CASE("Watch lists: create, switch, rename, delete; shared holdings survive"
     REQUIRE(LoadConfig(ini.path, L"Big Five", cfg, err));   // unknown list falls back
     CHECK(cfg.listName.empty());
     CHECK(cfg.listCount == 1);
+}
+
+TEST_CASE("MoveStockToList moves a ticker and keeps its shared data") {
+    TempIni ini;
+    ini.Write(kIni);
+    Config cfg;
+    std::wstring err;
+    REQUIRE(CreateList(ini.path, L"Banks", err));
+    REQUIRE(LoadConfig(ini.path, L"", cfg, err));
+    REQUIRE(cfg.stockCount == 2);
+
+    // Default -> Banks: gone from the default list, at the end of Banks, holding intact.
+    CHECK(MoveStockToList(cfg, L"RY.TO", L"Banks", err) == MoveResult::Moved);
+    REQUIRE(LoadConfig(ini.path, L"", cfg, err));
+    REQUIRE(cfg.stockCount == 1);
+    CHECK(cfg.stocks[0].symbol == L"DOL.TO");
+    REQUIRE(LoadConfig(ini.path, L"Banks", cfg, err));
+    REQUIRE(cfg.stockCount == 1);
+    CHECK(cfg.stocks[0].symbol == L"RY.TO");
+    CHECK(cfg.stocks[0].name == L"Royal Bank of Canada");
+    CHECK(cfg.stocks[0].holding.qty == Approx(100.0));
+
+    // The active list and an unknown list are refused, and nothing changes.
+    CHECK(MoveStockToList(cfg, L"RY.TO", L"Banks", err) == MoveResult::Failed);
+    CHECK(MoveStockToList(cfg, L"RY.TO", L"Nope", err) == MoveResult::Failed);
+    REQUIRE(LoadConfig(ini.path, L"Banks", cfg, err));
+    CHECK(cfg.stockCount == 1);
+
+    // A symbol the target already has is only taken out of the source.
+    StockEntry dol;
+    dol.symbol = L"DOL.TO";
+    dol.name   = L"Dollarama";
+    REQUIRE(WriteStockEntry(cfg, dol, err));
+    REQUIRE(LoadConfig(ini.path, L"Banks", cfg, err));
+    CHECK(MoveStockToList(cfg, L"DOL.TO", L"", err) == MoveResult::AlreadyThere);
+    REQUIRE(LoadConfig(ini.path, L"Banks", cfg, err));
+    REQUIRE(cfg.stockCount == 1);
+    CHECK(cfg.stocks[0].symbol == L"RY.TO");
+    REQUIRE(LoadConfig(ini.path, L"", cfg, err));
+    REQUIRE(cfg.stockCount == 1);
+    CHECK(cfg.stocks[0].symbol == L"DOL.TO");
+    CHECK(cfg.stocks[0].alert.below == Approx(150.0));   // still listed, so its alert survives
+}
+
+TEST_CASE("MoveStockToList refuses a full target list") {
+    TempIni ini;
+    ini.Write(kIni);
+    Config cfg;
+    std::wstring err;
+    REQUIRE(CreateList(ini.path, L"Full", err));
+    REQUIRE(LoadConfig(ini.path, L"Full", cfg, err));
+    for (size_t i = 0; i < kMaxStocks; ++i) {
+        StockEntry e;
+        e.symbol = L"S" + std::to_wstring(i);
+        e.name   = e.symbol;
+        REQUIRE(WriteStockEntry(cfg, e, err));
+    }
+    REQUIRE(LoadConfig(ini.path, L"", cfg, err));
+    CHECK(MoveStockToList(cfg, L"RY.TO", L"Full", err) == MoveResult::Failed);
+    CHECK(err.find(L"already holds") != std::wstring::npos);
+    REQUIRE(LoadConfig(ini.path, L"", cfg, err));
+    CHECK(cfg.stockCount == 2);   // the source is untouched
 }
 
 TEST_CASE("NormalizeCurrency and NormalizeListName") {

@@ -16,6 +16,7 @@ struct ChartOptions {
     bool rsi       = false;
     bool inset     = true;
     bool benchmark = false;
+    bool weekBreaks = true;   // dashed line between weeks on daily ranges up to 1Y
 };
 
 // One line in the compare overlay.
@@ -76,6 +77,13 @@ struct PortfolioInput {
 };
 
 void DrawPortfolioChart(Gdiplus::Graphics& g, const Gdiplus::RectF& rc, const PortfolioInput& in, float scale);
+
+// Week separators: bars are placed by index, so weekends vanish from the x
+// axis; on short daily ranges (1M) a dashed line marks where one Monday-to-
+// Sunday week ends and the next begins. Times are Unix seconds, `gmtOffset`
+// the exchange's offset, so the week is the exchange's local one.
+bool WeekBreakBefore(int64_t prevTime, int64_t time, int32_t gmtOffset);
+bool ShowWeekBreaks(const RangeSpec& range, double spanDays);
 
 // Font helper shared with the panels: `pt` is a point size at 96 dpi.
 Gdiplus::REAL FontPx(float pt, float scale);

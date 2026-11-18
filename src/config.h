@@ -93,6 +93,7 @@ struct ViewState {
     bool   news      = false;
     bool   benchmark = false;
     bool   portfolio = false;           // portfolio-history view instead of the price chart
+    bool   weekBreaks = true;           // week separators on daily ranges
     float  insetX    = 0.0f;            // inset position, fractions of the free plot space
     float  insetY    = 0.0f;
     std::wstring selected;              // symbol
@@ -134,6 +135,14 @@ bool DeleteStockEntry(const Config& cfg, const std::wstring& symbol, std::wstrin
 
 // Rewrites the active list's section in the order of `cfg.stocks`.
 bool WriteStockOrder(const Config& cfg, std::wstring& err);
+
+// Moves `symbol` from the active list of `cfg` to the end of list `toList`.
+// Holdings, alerts, transactions, currency and the monitor flag are keyed by
+// symbol, so they go with it untouched. AlreadyThere: the target had it
+// already, so it was only taken out of the active list.
+enum class MoveResult { Failed, Moved, AlreadyThere };
+MoveResult MoveStockToList(const Config& cfg, const std::wstring& symbol, const std::wstring& toList,
+                           std::wstring& err);
 
 // Watch lists. Names are as shown; "" is the default list.
 bool CreateList(const std::wstring& path, const std::wstring& name, std::wstring& err);

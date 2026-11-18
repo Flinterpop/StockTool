@@ -423,6 +423,7 @@ void LoadViewState(const std::wstring& path, ViewState& out) {
     out.news      = ReadBool(path, kState, L"news", false);
     out.benchmark = ReadBool(path, kState, L"benchmark", false);
     out.portfolio = ReadBool(path, kState, L"portfolio", false);
+    out.weekBreaks = ReadBool(path, kState, L"week_breaks", true);
     double ix = 0.0;
     double iy = 0.0;
     ParsePair(ReadString(path, kState, L"inset_pos", L""), ix, iy);
@@ -452,6 +453,7 @@ bool SaveViewState(const std::wstring& path, const ViewState& s, std::wstring& e
         { L"news",      s.news ? L"1" : L"0" },
         { L"benchmark", s.benchmark ? L"1" : L"0" },
         { L"portfolio", s.portfolio ? L"1" : L"0" },
+        { L"week_breaks", s.weekBreaks ? L"1" : L"0" },
         { L"inset_pos", FormatPair(s.insetX, s.insetY) },
         { L"selected",  s.selected },
         { L"list",      s.list },
@@ -591,6 +593,54 @@ bool WriteStockOrder(const Config& cfg, std::wstring& err) {
         return false;
     }
     return true;
+}
+
+MoveResult MoveStockToList(const Config& cfg, const std::wstring& symbol, const std::wstring& toList,
+                           std::wstring& err) {
+    assert(!cfg.path.empty());
+    assert(!symbol.empty());
+    if (!ListExists(cfg, toList)) {
+        err = L"There is no watch list called " + toList;
+        return MoveResult::Failed;
+    }
+    if (_wcsicmp(toList.c_str(), cfg.listName.c_str()) == 0) {
+        err = symbol + L" is already in this list";
+        return MoveResult::Failed;
+    }
+    // Count the target's tickers and look for the symbol among them.
+    const std::wstring target = ListSection(toList);
+    std::array<wchar_t, kSectionBufChars> buf{};
+    const DWORD n = GetPrivateProfileSectionW(target.c_str(), buf.data(), static_cast<DWORD>(buf.size()),
+                                              cfg.path.c_str());
+    size_t count = 0;
+    bool present = false;
+    size_t pos = 0;
+    for (size_t guard = 0; guard < kSectionBufChars && pos < n; ++guard) {
+        const wchar_t* entry = buf.data() + pos;
+        const size_t len = wcsnlen_s(entry, buf.size() - pos);
+        if (len == 0) { break; }
+        pos += len + 1;
+        StockEntry e;
+        if (!SplitEntry(entry, e)) { continue; }
+        ++count;
+        if (_wcsicmp(e.symbol.c_str(), symbol.c_str()) == 0) { present = true; }
+    }
+    if (!present && count >= kMaxStocks) {
+        err = toList + L" already holds " + std::to_wstring(kMaxStocks) + L" tickers";
+        return MoveResult::Failed;
+    }
+    // Target first, then the source: a failure in between leaves the ticker in
+    // both lists rather than in neither. The symbol stays listed, so
+    // DeleteStockEntry keeps its holding, alerts, transactions and flags.
+    if (!present) {
+        std::wstring name = symbol;
+        for (size_t i = 0; i < cfg.stockCount; ++i) {
+            if (_wcsicmp(cfg.stocks[i].symbol.c_str(), symbol.c_str()) == 0) { name = cfg.stocks[i].name; }
+        }
+        if (!WriteString(cfg.path, target.c_str(), symbol.c_str(), name.c_str(), err)) { return MoveResult::Failed; }
+    }
+    if (!DeleteStockEntry(cfg, symbol, err)) { return MoveResult::Failed; }
+    return present ? MoveResult::AlreadyThere : MoveResult::Moved;
 }
 
 bool CreateList(const std::wstring& path, const std::wstring& name, std::wstring& err) {

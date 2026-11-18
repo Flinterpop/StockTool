@@ -179,6 +179,21 @@ void DrawDateAxis(Graphics& g, const Layout& L, const Series& srs, const RangeSp
     }
 }
 
+// A dashed line in the gap between the last bar of one week and the first of
+// the next, through the price, volume and RSI panes.
+void DrawWeekBreaks(Graphics& g, const Layout& L, const Series& srs, const RangeSpec& r,
+                    int32_t gmtOffset, const Theme& th, float s, float gridBottom) {
+    if (srs.count < 2 || !ShowWeekBreaks(r, SpanDays(srs))) { return; }
+    Pen pen(Color(150, th.textMuted.GetR(), th.textMuted.GetG(), th.textMuted.GetB()), 1.0f * s);
+    pen.SetDashStyle(DashStyleDash);
+    const float slot = SlotWidth(L.price, srs.count);
+    for (size_t i = 1; i < srs.count && i < kMaxPoints; ++i) {
+        if (!WeekBreakBefore(srs.pts[i - 1].time, srs.pts[i].time, gmtOffset)) { continue; }
+        const float x = L.price.X + static_cast<float>(i) * slot;
+        g.DrawLine(&pen, x, L.price.Y, x, gridBottom);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Series
 
@@ -858,6 +873,25 @@ NormalCtx NormalContext(const RectF& rc, const ChartInput& in, float s) {
 
 } // namespace
 
+// Monday-based week number of the exchange-local day: day 0 (1 Jan 1970) was a
+// Thursday, so +3 puts Monday at the start of each 7-day block.
+bool WeekBreakBefore(int64_t prevTime, int64_t time, int32_t gmtOffset) {
+    assert(prevTime <= time);
+    auto week = [gmtOffset](int64_t t) {
+        const int64_t local = t + gmtOffset;
+        const int64_t day   = (local >= 0) ? local / 86400 : (local - 86399) / 86400;   // floor
+        const int64_t d3    = day + 3;
+        return (d3 >= 0) ? d3 / 7 : (d3 - 6) / 7;                                      // floor
+    };
+    return week(time) != week(prevTime);
+}
+
+// Daily bars over up to about a year: 1M, 6M, YTD and 1Y. 5Y and MAX use
+// weekly and monthly bars, where every bar would be a week of its own.
+bool ShowWeekBreaks(const RangeSpec& range, double spanDays) {
+    return !range.intraday && spanDays > 0.0 && spanDays <= 370.0;
+}
+
 void DrawChartBase(Graphics& g, const RectF& rc, const ChartInput& in, float scale) {
     assert(scale > 0.0f);
     assert(in.range != nullptr);
@@ -880,6 +914,7 @@ void DrawChartBase(Graphics& g, const RectF& rc, const ChartInput& in, float sca
     const Layout& L = c.L;
     DrawPriceGrid(g, L, c.sc, axisFont, th, scale, false);
     DrawDateAxis(g, L, srs, *in.range, in.data->meta.gmtOffsetSec, axisFont, th, scale, c.gridBottom);
+    if (in.opts.weekBreaks) { DrawWeekBreaks(g, L, srs, *in.range, in.data->meta.gmtOffsetSec, th, scale, c.gridBottom); }
 
     g.SetClip(RectF(L.price.X, L.price.Y - 2.0f, L.price.Width, L.price.Height + 4.0f));
     if (in.opts.candles) { DrawCandles(g, L, srs, c.sc, th, scale); }
